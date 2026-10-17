@@ -1,5 +1,12 @@
 // Keeps the screen awake while processing/exporting; re-acquires the lock if
-// the system releases it (e.g. after the page was hidden).
+// the system releases it (e.g. after the page was hidden). In the native iOS
+// app (Capacitor/WKWebView) the Screen Wake Lock API may be missing, so the
+// native idle-timer plugin is used instead.
+import { Capacitor } from '@capacitor/core';
+import { KeepAwake } from '@capacitor-community/keep-awake';
+
+const native = Capacitor.isNativePlatform();
+
 export class WakeLockKeeper {
   private sentinel: WakeLockSentinel | null = null;
   private wanted = false;
@@ -8,17 +15,26 @@ export class WakeLockKeeper {
 
   constructor() {
     document.addEventListener('visibilitychange', () => {
-      if (this.wanted && document.visibilityState === 'visible') void this.acquire();
+      if (this.wanted && !native && document.visibilityState === 'visible') void this.acquire();
     });
   }
 
   async enable(): Promise<void> {
     this.wanted = true;
+    if (native) {
+      try { await KeepAwake.keepAwake(); this.set('on (native)'); } catch (e) { this.set(`failed: ${String(e)}`); }
+      return;
+    }
     await this.acquire();
   }
 
   async disable(): Promise<void> {
     this.wanted = false;
+    if (native) {
+      await KeepAwake.allowSleep().catch(() => {});
+      this.set('off');
+      return;
+    }
     const s = this.sentinel;
     this.sentinel = null;
     if (s && !s.released) await s.release().catch(() => {});

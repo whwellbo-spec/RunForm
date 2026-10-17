@@ -11,14 +11,19 @@
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "test": "vitest run",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "ios": "npm run build && cap sync ios && cap open ios"
   },
   "dependencies": {
+    "@capacitor-community/keep-awake": "^8.0.1",
+    "@capacitor/core": "^8.5.3",
+    "@capacitor/ios": "^8.5.3",
     "@mediapipe/tasks-vision": "1.1.1",
     "idb": "^8.0.4",
     "mp4box": "^2.4.1"
   },
   "devDependencies": {
+    "@capacitor/cli": "^8.5.3",
     "@types/dom-webcodecs": "^0.1.19",
     "typescript": "^7.0.2",
     "vite": "^8.3.4",

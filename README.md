@@ -123,6 +123,44 @@ Code layout:
 - `src/pose/`: the landmarker setup and the resumable extractor.
 - `src/store/`: IndexedDB via `idb`.
 
+## Native iOS app (Capacitor)
+
+`ios/` is an Xcode project that wraps the same web build in a native app.
+The models and WASM are bundled inside the app, so it runs fully offline.
+Building it needs a Mac with Xcode, plus Node.js 22+ (`brew install node`).
+
+One-time setup and every update:
+
+```sh
+git clone https://github.com/whwellbo-spec/RunForm.git && cd RunForm   # first time
+git pull                                                                 # later updates
+npm install
+npm run ios        # builds the web app, copies it into ios/, opens Xcode
+```
+
+In Xcode:
+
+1. Select the **App** target, open **Signing & Capabilities**, and choose your Apple ID
+   under **Team**. If you have none listed, add one under **Xcode → Settings → Accounts**.
+   If the bundle ID `com.whwellbo.runform` is taken, change it to anything unique.
+2. Plug in the iPhone, unlock it, and pick it as the run destination in the toolbar.
+3. Press **Run** (⌘R).
+4. The first time only, open **Settings → General → VPN & Device Management** on the
+   iPhone, trust your developer certificate, and turn on **Developer Mode** if asked
+   (**Settings → Privacy & Security**).
+
+With a free Apple ID, the app expires after 7 days. Run it from Xcode again to renew it.
+A paid Apple Developer account extends that to a year.
+
+Native-app notes:
+- The app keeps the screen awake with the `@capacitor-community/keep-awake` plugin
+  (an idle-timer switch) instead of the web Screen Wake Lock API.
+- The service worker isn't used inside the app because the files are already local.
+- The deployment target is iOS 17, for WebCodecs support in WKWebView. If WebCodecs
+  can't decode a clip, the app falls back to seek-based extraction, as on the web.
+- Pick clips with **Choose File → Files** rather than the photo library. The photo
+  picker can transcode the video.
+
 ## Deploy (GitHub Pages)
 
 `.github/workflows/deploy.yml` runs the tests, builds with
