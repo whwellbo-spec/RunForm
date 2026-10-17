@@ -1,0 +1,131 @@
+# RunForm
+
+A personal web app that analyzes running form from video, built for Safari on iPhone.
+All processing happens on the device. There's no backend, no accounts, and no upload.
+Pose estimation uses MediaPipe PoseLandmarker. The model files and the WASM runtime are
+bundled with the app and precached by the service worker, so after the first load the app
+works offline.
+
+**Status: Phase 1 of 7.** Phase 1 covers import, file diagnostics, slow-mo timing and trim,
+pose extraction (WebCodecs with a seek fallback), wake lock, PWA setup and deploy.
+
+## Recording a good clip
+
+- **Camera:** use a tripod at hip height, 3–5 m from the runner, with the camera
+  perpendicular to the direction of travel for sagittal (side) clips. For frontal clips,
+  put it directly in front of or behind the runner.
+- **Frame rate:** use the native Camera app's Slo-mo mode (240 fps works best).
+- **Lighting:** bright, even light. Slow-mo uses short exposures, so low light adds
+  sensor noise and motion blur, and both hurt landmark accuracy (heels and toes most of all).
+- **Clothing:** wear clothes that contrast with the background, with legs and feet clearly
+  visible. Avoid baggy shorts and dark shoes on a dark belt.
+- **Duration:** on a treadmill, record 15–20 s at a steady pace. Overground, record
+  several passes. Each pass only captures 1–2 strides at 3–5 m. Combining passes comes
+  in phase 7.
+- **Framing:** keep the whole body in frame for the full analysis window, with some
+  margin above the head and below the feet.
+
+## Importing: save to Files first
+
+Picking a video from Photos through a browser file input can make iOS transcode or
+compress it, and that can drop frames or change the timing. Instead:
+
+1. In Photos, open the clip and tap **Share → Save to Files**.
+2. In RunForm, tap **Choose video…** and pick the clip from the **Files** browser.
+
+The diagnostics panel shows exactly what the file contains. If the sample count or the
+interval histogram looks wrong, re-export it via Files.
+
+## Slow-mo timing
+
+iPhone slow-mo clips can reach the app in two forms. The diagnostics panel tells you which
+one you have:
+
+| What the file contains | Diagnostics show | Settings |
+|---|---|---|
+| Original high-rate samples on a real-time timeline | ~4.17 ms intervals, ~240 fps | capture 240 fps, factor **1** (detected automatically) |
+| Export retimed to a 30 fps playback timeline | ~33.3 ms intervals | capture 240 fps, factor **8** (default when slow-mo metadata is found; otherwise set it yourself) |
+
+- The slow-mo factor means "file seconds per real second." Every timing value is
+  converted to real time with `real = (t − t_start) / factor`.
+- In a retimed export, only the middle section has a constant factor. The speed ramps at
+  the start and end have variable timing. Use the trim controls to exclude them. **Auto:
+  longest uniform section** finds the longest run of constant intervals. The histogram
+  for the trimmed window should show a single bar.
+- The readout compares the capture fps implied by the window's timing and your factor
+  against the capture fps you entered, and flags any mismatch.
+- **Duplicate frames:** on import, every frame is decoded and reduced to a 64×36
+  grayscale hash, and only the hash is kept. A frame counts as a duplicate of the one
+  before it when no hash pixel differs by more than the threshold (default 3). The test
+  uses the maximum difference, not the mean. With a static background, real consecutive
+  240 fps frames differ only where the runner is, so their mean difference can be tiny.
+  The panel shows the distribution of differences, so you can judge whether the threshold
+  makes sense.
+
+## Frame extraction
+
+- **Primary path:** mp4box.js parses only the `moov` box. The `mdat` payload is skipped,
+  and sample bytes are read from the File on demand in 8 MB blocks. WebCodecs
+  `VideoDecoder` decodes every sample in the trim window, starting from the keyframe
+  before it. Each `VideoFrame` is drawn with the track's rotation applied, hashed, and then
+  `close()`d **before** inference runs. At most ~3 decoded frames and ~4 queued chunks
+  exist at any time. If any frame in the window never comes out of the decoder, the run
+  fails with an error. Frames are never skipped silently.
+- **Fallback:** if `VideoDecoder.isConfigSupported()` rejects the codec, the app seeks a
+  hidden `<video>` frame by frame. Each seek targets a point a quarter of the way into the
+  frame and is checked against `requestVideoFrameCallback`'s `mediaTime`. Each frame gets
+  one retry, and the result reports how many seeks couldn't be verified. You can also
+  force this path for testing.
+- PoseLandmarker runs in VIDEO mode with real-time timestamps. It tries the GPU delegate
+  first and falls back to CPU, including when GPU inference fails mid-run.
+- Landmarks are stored as `Float32Array`s laid out frame × landmark × (x, y, z, visibility).
+  There are three arrays: normalized, pixel, and world (metres). IndexedDB stores them as
+  typed arrays.
+- **Wake lock:** the app holds a Screen Wake Lock while processing and re-acquires it if
+  it's released. **If the page is hidden, extraction pauses.** Tap Resume to continue
+  from the next unprocessed frame. Decoding restarts from the nearest keyframe, so no
+  progress is lost.
+
+## iOS / Safari notes and workarounds
+
+- The `<video>` element used for seeking has to be in the DOM (it's placed off-screen),
+  and it needs `playsinline` and `muted`. Otherwise iOS won't decode frames for it.
+- Decoded `VideoFrame`s don't have the track's rotation applied. The app reads the
+  `tkhd` matrix and rotates when drawing. The `<video>` element (seek path) already
+  presents the rotated frame.
+- The app watches `visibilitychange` because iOS can suspend the tab or reclaim the
+  decoder or GPU context in the background. Each resume creates a fresh decoder.
+- iOS can clear website storage. Session backup/export comes in phase 7. Until then,
+  treat saved sessions as temporary.
+- Precached assets total about 65 MB: the heavy model (~30 MB), the full model (~9 MB),
+  and the SIMD and non-SIMD WASM builds (~13 MB each). Load the page once while online.
+  Then Add to Home Screen.
+
+## Development
+
+```sh
+npm install
+npm run dev        # copies WASM + downloads models into public/, starts Vite
+npm test           # Vitest: pure analysis modules
+npm run build      # typecheck + production build (dist/)
+```
+
+`scripts/prepare-assets.mjs` copies the MediaPipe WASM fileset from `node_modules`. It
+also downloads the pinned `float16/1` pose models into `public/`. Both are gitignored and
+rebuilt in CI.
+
+Code layout:
+
+- `src/analysis/`: pure TypeScript with no DOM: timing, frame-hash comparison, and
+  landmark layout. It's unit-tested in `tests/`.
+- `src/media/`: demuxing, sample-table math (`clipmath.ts`, which is pure and tested),
+  WebCodecs decoding, the seek fallback, and the duplicate scan.
+- `src/pose/`: the landmarker setup and the resumable extractor.
+- `src/store/`: IndexedDB via `idb`.
+
+## Deploy (GitHub Pages)
+
+`.github/workflows/deploy.yml` runs the tests, builds with
+`BASE_PATH=/<repo-name>/`, and deploys `dist/` to Pages on every push to `main`.
+To set it up once, open the repo's **Settings → Pages** and set **Source** to
+**GitHub Actions**.

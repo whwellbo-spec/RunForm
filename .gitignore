@@ -1,0 +1,5 @@
+node_modules
+dist
+# Fetched/copied by scripts/prepare-assets.mjs
+public/models/*.task
+public/mediapipe/
