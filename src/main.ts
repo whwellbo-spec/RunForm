@@ -1,207 +1,153 @@
 import './style.css';
-import { CONNECTIONS, LM, meanVisibility, offset, STRIDE, type PoseTrack } from './analysis/landmarks';
-import {
-  checkTiming, guessTiming, intervalHistogram, intervals, intervalStats, longestUniformRun, type HistogramBin, type TimingSettings,
-} from './analysis/timing';
+import { CONNECTIONS, offset, type PoseTrack } from './analysis/landmarks';
+import { analyzeGait, type GaitResult } from './analysis/metrics';
+import { poseReport, type PoseReport } from './analysis/posemethod';
+import { checkTiming, guessTiming, intervals, intervalStats, longestUniformRun, type TimingSettings } from './analysis/timing';
 import { webCodecsSupport } from './media/decode';
 import { demux, type ClipInfo } from './media/demux';
 import type { ExtractionPath } from './media/frames';
-import { countDuplicates, scanDuplicates, type ScanResult } from './media/scan';
 import { Extractor } from './pose/extract';
 import type { ModelVariant } from './pose/landmarker';
-import { deleteSession, listSessions, saveSession, type ClipTags, type SessionRecord } from './store/db';
+import { deleteSession, listSessions, matchesVideoRef, saveSession, type ClipTags, type SessionRecord } from './store/db';
+import { Player } from './ui/player';
+import { esc, reportHTML, statusOfScore, wireReport } from './ui/report';
+import { renderStills } from './ui/stills';
 import { WakeLockKeeper } from './wakelock';
 
 const $ = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
-const fmt = (v: number, d = 2) => (Number.isFinite(v) ? v.toFixed(d) : '–');
-const esc = (s: string) => s.replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' })[c]!);
+const fmt = (v: number, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '–');
 
-// ---------- persistent settings (per-device conveniences) ----------
+// ---------- settings (per-device conveniences) ----------
 const SETTINGS_KEY = 'runform.settings';
-interface Settings { model: ModelVariant; dupThreshold: number; speedUnit: string }
+interface Settings { model: ModelVariant; speedUnit: string; heightCm: number; heightUnit: 'cm' | 'in' }
 function loadSettings(): Settings {
-  const d: Settings = { model: 'heavy', dupThreshold: 3, speedUnit: 'kmh' };
+  const d: Settings = { model: 'heavy', speedUnit: 'mph', heightCm: 175, heightUnit: 'in' };
   try { return { ...d, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') }; } catch { return d; }
 }
-function storeSettings() {
-  try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* storage unavailable */ }
-}
 const settings = loadSettings();
+function storeSettings() { try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* unavailable */ } }
+
+/** Longest analysis window by default, in real seconds. */
+const MAX_DEFAULT_REAL_S = 8;
+const DUP_THRESHOLD = 3;
 
 // ---------- state ----------
 let clip: ClipInfo | null = null;
-let scan: ScanResult | null = null;
-let scanAbort: AbortController | null = null;
-let wcSupport: { supported: boolean; reason: string } = { supported: false, reason: '' };
+let wcSupport = { supported: false, reason: '' };
 let trim = { start: 0, end: 0 };
 let extractor: Extractor | null = null;
+let player: Player | null = null;
 const wake = new WakeLockKeeper();
 
-// ---------- rendering helpers ----------
-function kv(table: HTMLElement, rows: Array<[string, string]>) {
-  table.innerHTML = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join('');
+// ---------- navigation ----------
+type ViewId = 'home' | 'setup' | 'run' | 'report';
+let current: ViewId = 'home';
+function show(v: ViewId, title = 'RunForm') {
+  current = v;
+  for (const id of ['home', 'setup', 'run', 'report'] as ViewId[]) $(`v-${id}`).hidden = id !== v;
+  $('back-btn').hidden = v === 'home' || v === 'run';
+  $('topbar-title').textContent = title;
+  document.body.classList.toggle('at-home', v === 'home');
+  if (v !== 'report') { player?.destroy(); player = null; }
+  scrollTo(0, 0);
+}
+$('back-btn').addEventListener('click', () => {
+  if (current === 'setup' || current === 'report') { show('home'); void renderSessions(); }
+});
+
+// ---------- home ----------
+$('file-input').addEventListener('change', async (e) => {
+  const input = e.target as HTMLInputElement;
+  const file = input.files?.[0];
+  input.value = '';
+  if (file) await importFile(file);
+});
+
+async function renderSessions() {
+  const el = $('sessions');
+  let list: SessionRecord[] = [];
+  try { list = await listSessions(); } catch (e) { el.innerHTML = `<p class="empty">Couldn’t open saved runs: ${esc(String(e))}</p>`; return; }
+  if (!list.length) { el.innerHTML = '<p class="empty">Your analyzed runs will show up here.</p>'; return; }
+  el.innerHTML = list.reverse().map((s) => {
+    const score = s.score ?? quickScore(s);
+    const st = Number.isFinite(score) ? statusOfScore(score) : '';
+    const when = new Date(s.createdAt).toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+    const view = s.tags.view === 'SAGITTAL' ? 'Side view' : 'Front view';
+    const surf = s.tags.surface === 'TREADMILL' ? 'treadmill' : 'outdoors';
+    return `<button type="button" class="session-card" data-id="${s.id}">
+      <span class="badge ${st}">${Number.isFinite(score) ? Math.round(score) : '–'}</span>
+      <span><span class="when">${esc(when)}</span><br><span class="meta">${view} · ${surf} · ${esc(s.video.name)}</span></span>
+      <span class="chev" aria-hidden="true">›</span></button>`;
+  }).join('');
+  el.querySelectorAll<HTMLButtonElement>('.session-card').forEach((b) => b.addEventListener('click', () => {
+    const rec = list.find((s) => s.id === b.dataset.id);
+    if (rec) void openReport(rec, null);
+  }));
 }
 
-function renderHistogram(el: HTMLElement, bins: HistogramBin[], factor: number) {
-  if (!bins.length) { el.textContent = 'No intervals.'; return; }
-  const MAX_BINS = 14;
-  let shown = bins;
-  let other = 0;
-  if (bins.length > MAX_BINS) {
-    const top = [...bins].sort((a, b) => b.count - a.count).slice(0, MAX_BINS);
-    const keep = new Set(top);
-    shown = bins.filter((b) => keep.has(b));
-    other = bins.filter((b) => !keep.has(b)).reduce((s, b) => s + b.count, 0);
-  }
-  const max = Math.max(...shown.map((b) => b.count));
-  el.innerHTML =
-    `<div class="bin muted"><span>media ms (real ms)</span><span></span><span class="cnt">count</span></div>` +
-    shown
-      .map((b) => `<div class="bin"><span>${fmt(b.ms, 3)} (${fmt(b.ms / factor, 3)})</span><span class="bar" style="width:${(100 * b.count) / max}%"></span><span class="cnt">${b.count}</span></div>`)
-      .join('') +
-    (other ? `<div class="bin muted"><span>${bins.length - shown.length} other bins</span><span></span><span class="cnt">${other}</span></div>` : '');
+function quickScore(s: SessionRecord): number {
+  try { return poseReport(analyze(s)).overall; } catch { return NaN; }
 }
 
+// ---------- setup ----------
 function timingSettings(): TimingSettings {
   return {
     captureFps: parseFloat($<HTMLInputElement>('capture-fps').value) || 30,
     slowmoFactor: parseFloat($<HTMLInputElement>('slowmo-factor').value) || 1,
   };
 }
-
 function chosenPath(): ExtractionPath {
-  if ($<HTMLSelectElement>('path-select').value === 'seek') return 'seek';
-  return wcSupport.supported ? 'webcodecs' : 'seek';
+  return $<HTMLSelectElement>('path-select').value === 'seek' || !wcSupport.supported ? 'seek' : 'webcodecs';
 }
 
-// ---------- import ----------
-$('model-select').addEventListener('change', (e) => { settings.model = (e.target as HTMLSelectElement).value as ModelVariant; storeSettings(); });
-$<HTMLSelectElement>('model-select').value = settings.model;
-$<HTMLInputElement>('dup-threshold').value = String(settings.dupThreshold);
-$('dup-threshold').addEventListener('change', (e) => {
-  settings.dupThreshold = Math.max(0, parseFloat((e.target as HTMLInputElement).value) || 0);
-  storeSettings();
-  renderScan();
-  renderWindow();
-});
-
-$('file-input').addEventListener('change', async (e) => {
-  const file = (e.target as HTMLInputElement).files?.[0];
-  if (!file) return;
-  await importFile(file);
-});
-
 async function importFile(file: File) {
-  scanAbort?.abort();
   extractor?.cancel();
   extractor = null;
-  scan = null;
   const st = $('import-status');
-  st.textContent = `Reading ${file.name} (${(file.size / 1e6).toFixed(1)} MB)…`;
-  for (const id of ['sec-diag', 'sec-timing', 'sec-tags', 'sec-process', 'sec-result']) $(id).hidden = true;
+  st.textContent = `Opening ${file.name}…`;
   try {
     clip = await demux(file);
   } catch (err) {
-    st.innerHTML = `<span class="bad">Could not read file: ${esc(String(err))}</span>`;
+    st.innerHTML = `<span class="bad">That file couldn’t be read as a video (${esc(String(err))}). Try saving it to Files and choosing it again.</span>`;
     clip = null;
     return;
   }
   st.textContent = '';
   wcSupport = await webCodecsSupport(clip);
-  renderDiagnostics();
 
   const allStats = intervalStats(intervals(clip.presTimeS));
   const guess = guessTiming(allStats.fps, clip.slowmoHints.length > 0);
   $<HTMLInputElement>('capture-fps').value = String(guess.captureFps);
   $<HTMLInputElement>('slowmo-factor').value = String(guess.slowmoFactor);
-  $('timing-guess').textContent = `Detected: ${guess.reason}`;
 
   const tv = $<HTMLVideoElement>('trim-video');
   if (tv.src) URL.revokeObjectURL(tv.src);
   tv.src = URL.createObjectURL(file);
+  for (const id of ['trim-start', 'trim-end']) $<HTMLInputElement>(id).max = String(clip.nSamples - 1);
 
-  for (const id of ['trim-start', 'trim-end', 'trim-start-num', 'trim-end-num']) {
-    ($<HTMLInputElement>(id)).max = String(clip.nSamples - 1);
-  }
-  setTrim(0, clip.nSamples - 1, 'start');
+  const warn = $('clip-warning');
+  warn.hidden = guess.captureFps >= 100;
+  warn.textContent = `This looks like a normal-speed video (${Math.round(guess.captureFps)} fps). It will work, but foot contacts are only accurate to about ${Math.round(1000 / guess.captureFps)} ms. Slo-mo (240 fps) gives much better results.`;
 
-  for (const id of ['sec-diag', 'sec-timing', 'sec-tags', 'sec-process']) $(id).hidden = false;
-  renderPathTable();
-  if (wcSupport.supported) void runScan();
-  else $('scan-status').textContent = 'Duplicate scan needs WebCodecs, which cannot decode this codec here. Duplicates will be counted during seek-based extraction.';
+  bestSection();
+  renderDiagnostics();
+  show('setup', 'New analysis');
 }
 
-function renderDiagnostics() {
+function bestSection() {
   if (!clip) return;
-  const c = clip;
-  const st = intervalStats(intervals(c.presTimeS));
-  let syncs = 0;
-  for (let i = 0; i < c.nSamples; i++) syncs += c.isSync[i];
-  kv($('diag-table'), [
-    ['File', `${esc(c.file.name)} — ${(c.file.size / 1e6).toFixed(1)} MB`],
-    ['Container brands', esc(c.brands.join(', '))],
-    ['Codec', esc(c.codec)],
-    ['Coded resolution', `${c.codedWidth}×${c.codedHeight}`],
-    ['Rotation / display', `${c.rotation}° → ${c.width}×${c.height}`],
-    ['Total video samples', String(c.nSamples)],
-    ['Keyframes', String(syncs)],
-    ['Track duration (file timeline)', `${fmt(c.durationS, 3)} s`],
-    ['Container frame rate (samples ÷ duration)', `${fmt(c.nominalFps, 3)} fps`],
-    ['Median interval → fps', `${fmt(st.medianS * 1000, 3)} ms → ${fmt(st.fps, 3)} fps`],
-    ['Interval min / max', `${fmt(st.minS * 1000, 3)} / ${fmt(st.maxS * 1000, 3)} ms`],
-    ['Intervals within ±5% of median', `${fmt(st.uniformFraction * 100, 1)} %`],
-    ['Slow-mo metadata hints', c.slowmoHints.length ? esc(c.slowmoHints.join(', ')) : 'none found'],
-    ['Audio track', c.hasAudio ? 'yes' : 'no'],
-    ['WebCodecs', wcSupport.supported ? `<span class="ok">${esc(wcSupport.reason)}</span>` : `<span class="warn">${esc(wcSupport.reason)}</span>`],
-  ]);
-  renderHistogram($('diag-hist'), intervalHistogram(intervals(c.presTimeS), 0.25), 1);
-}
-
-// ---------- duplicate scan ----------
-async function runScan() {
-  if (!clip) return;
-  scanAbort?.abort();
-  const ctrl = new AbortController();
-  scanAbort = ctrl;
-  const prog = $<HTMLProgressElement>('scan-progress');
-  prog.hidden = false;
-  $('scan-cancel').hidden = false;
-  $('scan-btn').hidden = true;
-  const st = $('scan-status');
-  try {
-    scan = await scanDuplicates(clip, ctrl.signal, (done, total) => {
-      prog.value = done / total;
-      st.textContent = `Decoding all frames to hash them… ${done}/${total}`;
-    });
-  } catch (e) {
-    if ((e as DOMException).name === 'AbortError') st.textContent = 'Scan cancelled.';
-    else st.innerHTML = `<span class="bad">Scan failed: ${esc(String(e))}</span>`;
-  } finally {
-    if (scanAbort === ctrl) scanAbort = null;
-    prog.hidden = true;
-    $('scan-cancel').hidden = true;
-    $('scan-btn').hidden = false;
+  const r = longestUniformRun(clip.presTimeS, 0.05);
+  const s = timingSettings();
+  // Cap the default window to keep processing time reasonable, centred in the uniform run.
+  const maxFrames = Math.round(MAX_DEFAULT_REAL_S * s.captureFps);
+  let { start, end } = r;
+  if (end - start + 1 > maxFrames) {
+    const mid = Math.round((start + end) / 2);
+    start = mid - Math.floor(maxFrames / 2);
+    end = start + maxFrames - 1;
   }
-  renderScan();
-  renderWindow();
+  setTrim(start, end, 'start');
 }
-$('scan-btn').addEventListener('click', () => void runScan());
-$('scan-cancel').addEventListener('click', () => scanAbort?.abort());
-
-function renderScan() {
-  if (!clip || !scan) return;
-  const n = countDuplicates(scan.diffMax, 0, clip.nSamples - 1, settings.dupThreshold);
-  // Smallest diffs help judge whether the threshold is sensible.
-  const finite = Array.from(scan.diffMax).filter(Number.isFinite).sort((a, b) => a - b);
-  const pct = (q: number) => finite[Math.min(finite.length - 1, Math.floor(q * finite.length))];
-  $('scan-status').innerHTML =
-    `${scan.framesDecoded}/${clip.nSamples} frames decoded in ${fmt(scan.elapsedS, 1)} s.\n` +
-    `<b>${n}</b> duplicate frame(s) (max pixel diff ≤ ${settings.dupThreshold}).\n` +
-    `Frame-diff distribution (max pixel diff): min ${fmt(finite[0], 0)}, 1% ${fmt(pct(0.01), 0)}, 5% ${fmt(pct(0.05), 0)}, median ${fmt(pct(0.5), 0)}.`;
-}
-
-// ---------- timing & trim ----------
-for (const id of ['capture-fps', 'slowmo-factor']) $(id).addEventListener('input', renderWindow);
 
 function setTrim(start: number, end: number, focus: 'start' | 'end') {
   if (!clip) return;
@@ -211,12 +157,12 @@ function setTrim(start: number, end: number, focus: 'start' | 'end') {
   trim = { start, end };
   $<HTMLInputElement>('trim-start').value = String(start);
   $<HTMLInputElement>('trim-end').value = String(end);
-  $<HTMLInputElement>('trim-start-num').value = String(start);
-  $<HTMLInputElement>('trim-end-num').value = String(end);
-  $('trim-start-out').textContent = `${start} @ ${fmt(clip.presTimeS[start], 3)} s`;
-  $('trim-end-out').textContent = `${end} @ ${fmt(clip.presTimeS[end], 3)} s`;
+  const s = timingSettings();
+  const real = (p: number) => (clip!.presTimeS[p] - clip!.presTimeS[0]) / s.slowmoFactor;
+  $('trim-start-out').textContent = `${fmt(real(start), 2)} s`;
+  $('trim-end-out').textContent = `${fmt(real(end), 2)} s`;
   previewFrame(focus === 'start' ? start : end);
-  renderWindow();
+  renderClipLine();
 }
 
 let previewPending: number | null = null;
@@ -240,127 +186,130 @@ function previewFrame(p: number) {
   go();
 }
 
-$('trim-start').addEventListener('input', (e) => setTrim(+(e.target as HTMLInputElement).value, trim.end, 'start'));
-$('trim-end').addEventListener('input', (e) => setTrim(trim.start, +(e.target as HTMLInputElement).value, 'end'));
-$('trim-start-num').addEventListener('change', (e) => setTrim(+(e.target as HTMLInputElement).value, trim.end, 'start'));
-$('trim-end-num').addEventListener('change', (e) => setTrim(trim.start, +(e.target as HTMLInputElement).value, 'end'));
-document.querySelectorAll<HTMLButtonElement>('button[data-trim]').forEach((b) => {
-  b.addEventListener('click', () => {
-    const d = +b.dataset.delta!;
-    if (b.dataset.trim === 'start') setTrim(trim.start + d, trim.end, 'start');
-    else setTrim(trim.start, trim.end + d, 'end');
-  });
-});
-$('trim-auto').addEventListener('click', () => {
-  if (!clip) return;
-  const r = longestUniformRun(clip.presTimeS, 0.05);
-  setTrim(r.start, r.end, 'start');
-});
-$('trim-all').addEventListener('click', () => clip && setTrim(0, clip.nSamples - 1, 'start'));
-
-function renderWindow() {
+function renderClipLine() {
   if (!clip) return;
   const s = timingSettings();
-  const { start, end } = trim;
-  const iv = intervals(clip.presTimeS, start, end);
-  const st = intervalStats(iv);
-  const chk = checkTiming(clip.presTimeS, start, end, s);
-  const dups = scan ? String(countDuplicates(scan.diffMax, start, end, settings.dupThreshold)) : 'not scanned';
-  kv($('window-table'), [
-    ['Frames', String(end - start + 1)],
-    ['Duration (file timeline)', `${fmt(chk.mediaDurationS, 3)} s`],
-    ['Duration (real time)', `<b>${fmt(chk.realDurationS, 3)} s</b>`],
-    ['Median interval', `${fmt(st.medianS * 1000, 3)} ms media = ${fmt((st.medianS * 1000) / s.slowmoFactor, 3)} ms real`],
-    ['Within ±5% of median', `${fmt(st.uniformFraction * 100, 1)} %${st.uniformFraction < 0.98 ? ' <span class="warn">(not uniform — check for speed ramps)</span>' : ''}`],
-    ['Interval CV', fmt(st.cv, 4)],
-    ['Duplicate frames in window', dups],
-  ]);
-  renderHistogram($('window-hist'), intervalHistogram(iv, 0.25), s.slowmoFactor);
-
-  $('timing-readout').innerHTML =
-    `File timeline fps in window: <b>${fmt(chk.windowMediaFps, 2)}</b> · slow-mo ×${fmt(s.slowmoFactor, 3)} → implied capture <b>${fmt(chk.impliedCaptureFps, 1)} fps</b> ` +
-    `vs entered <b>${fmt(s.captureFps, 1)} fps</b> ` +
-    (chk.ok ? '<span class="ok">✓ consistent</span>' : `<span class="bad">✗ ${fmt(chk.mismatch * 100, 1)}% mismatch</span>`) +
-    `<br>1 s of file = ${fmt(1 / s.slowmoFactor, 4)} s real · 1 frame = ${fmt(1000 / s.captureFps, 3)} ms real`;
-  renderPathTable();
+  const frames = trim.end - trim.start + 1;
+  const realS = (clip.presTimeS[trim.end] - clip.presTimeS[trim.start]) / s.slowmoFactor;
+  const totalReal = clip.durationS / s.slowmoFactor;
+  const perSec = settings.model === 'heavy' ? 9 : 16;
+  const etaMin = Math.max(1, Math.round(frames / perSec / 60));
+  const kind = s.captureFps >= 100 ? `${Math.round(s.captureFps)} fps slow-mo` : `${Math.round(s.captureFps)} fps`;
+  $('clip-line').innerHTML = `<b>${kind}</b> · analyzing <b>${fmt(realS, 1)} s</b> of ${fmt(totalReal, 1)} s · about ${etaMin} min`;
+  const chk = checkTiming(clip.presTimeS, trim.start, trim.end, s);
+  $('timing-readout').innerHTML = chk.ok
+    ? `Timing checks out: ${fmt(chk.impliedCaptureFps, 0)} fps capture.`
+    : `<span class="bad">The file’s timing implies ${fmt(chk.impliedCaptureFps, 0)} fps, not ${fmt(s.captureFps, 0)}. Check the slow-mo factor.</span>`;
 }
 
-// ---------- tags ----------
+function renderDiagnostics() {
+  if (!clip) return;
+  const c = clip;
+  const st = intervalStats(intervals(c.presTimeS));
+  const rows: Array<[string, string]> = [
+    ['Codec', esc(c.codec)],
+    ['Size', `${c.width}×${c.height}`],
+    ['Frames', String(c.nSamples)],
+    ['File frame rate', `${fmt(st.fps, 1)} fps`],
+    ['Even frame spacing', `${fmt(st.uniformFraction * 100, 0)}%`],
+    ['Slow-mo metadata', c.slowmoHints.length ? 'found' : 'none'],
+    ['Frame reading', wcSupport.supported ? 'Direct decode' : `Compatibility mode (${esc(wcSupport.reason)})`],
+  ];
+  $('diag-table').innerHTML = rows.map(([k, v]) => `<tr><td>${esc(k)}</td><td>${v}</td></tr>`).join('');
+}
+
+$('trim-start').addEventListener('input', (e) => setTrim(+(e.target as HTMLInputElement).value, trim.end, 'start'));
+$('trim-end').addEventListener('input', (e) => setTrim(trim.start, +(e.target as HTMLInputElement).value, 'end'));
+$('trim-auto').addEventListener('click', bestSection);
+$('trim-all').addEventListener('click', () => clip && setTrim(0, clip.nSamples - 1, 'start'));
+for (const id of ['capture-fps', 'slowmo-factor']) $(id).addEventListener('input', () => { renderClipLine(); setTrim(trim.start, trim.end, 'start'); });
+
+$<HTMLSelectElement>('model-select').value = settings.model;
+$('model-select').addEventListener('change', (e) => { settings.model = (e.target as HTMLSelectElement).value as ModelVariant; storeSettings(); renderClipLine(); });
+
+// Height
+function renderHeight() {
+  $<HTMLSelectElement>('height-unit').value = settings.heightUnit;
+  const v = settings.heightUnit === 'in' ? Math.round((settings.heightCm / 2.54) * 2) / 2 : Math.round(settings.heightCm);
+  const inp = $<HTMLInputElement>('height-input');
+  inp.value = String(v);
+  inp.min = settings.heightUnit === 'in' ? '40' : '100';
+  inp.max = settings.heightUnit === 'in' ? '90' : '230';
+}
+$('height-unit').addEventListener('change', (e) => { settings.heightUnit = (e.target as HTMLSelectElement).value as 'cm' | 'in'; storeSettings(); renderHeight(); });
+$('height-input').addEventListener('change', (e) => {
+  const v = parseFloat((e.target as HTMLInputElement).value);
+  if (!Number.isFinite(v)) return;
+  const cm = settings.heightUnit === 'in' ? v * 2.54 : v;
+  if (cm >= 100 && cm <= 230) { settings.heightCm = cm; storeSettings(); }
+  renderHeight();
+});
+renderHeight();
+
+// View / surface
 function tags(): ClipTags {
   const view = (document.querySelector('input[name=view]:checked') as HTMLInputElement).value as ClipTags['view'];
   const surface = (document.querySelector('input[name=surface]:checked') as HTMLInputElement).value as ClipTags['surface'];
   const v = parseFloat($<HTMLInputElement>('belt-speed').value);
   const unit = $<HTMLSelectElement>('speed-unit').value;
-  const mps = unit === 'kmh' ? v / 3.6 : unit === 'mph' ? v * 0.44704 : v;
+  const mps = unit === 'kmh' ? v / 3.6 : v * 0.44704;
   return { view, surface, treadmillSpeedMps: surface === 'TREADMILL' && Number.isFinite(mps) ? mps : null };
 }
-document.querySelectorAll('input[name=surface]').forEach((r) =>
-  r.addEventListener('change', () => { $('speed-row').hidden = tags().surface !== 'TREADMILL'; }));
+document.querySelectorAll('input[name=surface]').forEach((r) => r.addEventListener('change', () => { $('speed-row').hidden = tags().surface !== 'TREADMILL'; }));
+document.querySelectorAll('input[name=view]').forEach((r) => r.addEventListener('change', () => {
+  $('view-hint').textContent = tags().view === 'SAGITTAL'
+    ? 'Side view is needed for the Pose, Fall and Pull scores.'
+    : 'Front or back view checks crossover and hip drop. Film from the side for the Pose Method scores.';
+}));
 $<HTMLSelectElement>('speed-unit').value = settings.speedUnit;
 $('speed-unit').addEventListener('change', (e) => { settings.speedUnit = (e.target as HTMLSelectElement).value; storeSettings(); });
 
-// ---------- extraction ----------
-function renderPathTable() {
-  if (!clip) return;
-  const path = chosenPath();
-  kv($('path-table'), [
-    ['Path', path === 'webcodecs' ? 'WebCodecs VideoDecoder (every sample decoded)' : '<span class="warn">Seek fallback (currentTime + requestVideoFrameCallback, verified)</span>'],
-    ['Why', esc(wcSupport.reason)],
-    ['Window', `frames ${trim.start}–${trim.end} (${trim.end - trim.start + 1})`],
-    ['Model', settings.model],
-  ]);
-}
-$('path-select').addEventListener('change', renderPathTable);
-
+// ---------- processing ----------
 $('run-btn').addEventListener('click', async () => {
   if (!clip) return;
-  if (tags().surface === 'TREADMILL' && tags().treadmillSpeedMps === null) {
-    if (!confirm('No treadmill speed entered. Continue anyway?')) return;
-  }
-  scanAbort?.abort();
+  const file = clip.file;
   const ex = new Extractor({
     clip, path: chosenPath(), presStart: trim.start, presEnd: trim.end,
-    timing: timingSettings(), model: settings.model, dupThreshold: settings.dupThreshold,
+    timing: timingSettings(), model: settings.model, dupThreshold: DUP_THRESHOLD,
   });
   extractor = ex;
-  const prog = $<HTMLProgressElement>('run-progress');
+  const runTags = tags();
+  const timing = timingSettings();
+  const t0 = trim;
+  show('run', 'Analyzing');
   const status = $('run-status');
   const preview = $<HTMLCanvasElement>('preview');
-  $('sec-result').hidden = true;
+  $('run-pct').textContent = '0';
+  $('run-meter').style.width = '0%';
+  status.textContent = 'Loading the body tracker…';
   ex.onProgress = (p) => {
-    prog.value = p.done / p.total;
-    status.textContent =
-      `${p.done}/${p.total} frames · ${fmt(p.fps, 1)} frames/s · ETA ${Number.isFinite(p.etaS) ? fmtDuration(p.etaS) : '…'}\n` +
-      `Path: ${ex.stats.path} · ${ex.stats.model} on ${ex.stats.delegate} · wake lock: ${wake.status}`;
+    const pct = Math.floor((100 * p.done) / p.total);
+    $('run-pct').textContent = String(pct);
+    $('run-meter').style.width = `${pct}%`;
+    const eta = Number.isFinite(p.etaS) ? (p.etaS > 90 ? `about ${Math.round(p.etaS / 60)} min left` : `about ${Math.max(5, Math.round(p.etaS / 5) * 5)} s left`) : 'estimating time…';
+    status.textContent = `Tracking your body: frame ${p.done} of ${p.total}, ${eta}.`;
   };
   ex.onPreview = (cv, track, f) => drawPreview(preview, cv, track, f);
   ex.onState = (s) => {
-    $('run-btn').hidden = s === 'running' || s === 'paused' || s === 'loading';
     $('pause-btn').hidden = s !== 'running';
     $('resume-btn').hidden = s !== 'paused';
-    $('cancel-btn').hidden = !(s === 'running' || s === 'paused' || s === 'loading');
-    if (s === 'loading') status.textContent = 'Loading pose model…';
-    if (s === 'paused') status.textContent += '\nPaused. Tap Resume to continue from where it stopped.';
-    if (s === 'cancelled') { status.textContent = 'Cancelled.'; void wake.disable(); }
-    if (s === 'error') { status.innerHTML = `<span class="bad">Error: ${esc(String(ex.error))}</span>`; void wake.disable(); }
-    if (s === 'done') { void wake.disable(); void finish(ex); }
+    if (s === 'paused') status.textContent = 'Paused. Tap Resume to carry on from here.';
+    if (s === 'cancelled') { void wake.disable(); show('setup', 'New analysis'); }
+    if (s === 'error') { void wake.disable(); status.innerHTML = `<span class="bad">Tracking stopped: ${esc(String(ex.error))}</span>`; }
+    if (s === 'done') { void wake.disable(); void finish(ex, file, runTags, timing, t0); }
   };
   await wake.enable();
   await ex.start();
 });
 $('pause-btn').addEventListener('click', () => extractor?.pause());
 $('resume-btn').addEventListener('click', async () => { await wake.enable(); await extractor?.resume(); });
-$('cancel-btn').addEventListener('click', () => extractor?.cancel());
-
-// Pause when the page is hidden instead of silently losing progress.
+$('cancel-btn').addEventListener('click', () => {
+  if (extractor && (extractor.state === 'running' || extractor.state === 'paused' || extractor.state === 'loading')) extractor.cancel();
+  else show('setup', 'New analysis');
+});
 document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'hidden' && extractor?.state === 'running') extractor.pause();
 });
-
-function fmtDuration(s: number) {
-  const m = Math.floor(s / 60);
-  return m ? `${m} min ${Math.round(s % 60)} s` : `${Math.round(s)} s`;
-}
 
 function drawPreview(out: HTMLCanvasElement, src: HTMLCanvasElement, t: PoseTrack, f: number) {
   const scale = Math.min(1, 720 / Math.max(src.width, src.height));
@@ -371,88 +320,175 @@ function drawPreview(out: HTMLCanvasElement, src: HTMLCanvasElement, t: PoseTrac
   if (!t.detected[f]) return;
   const P = (lm: number) => [t.px[offset(f, lm, 0)] * scale, t.px[offset(f, lm, 1)] * scale] as const;
   ctx.lineWidth = 3;
+  ctx.lineCap = 'round';
   for (const [a, b] of CONNECTIONS) {
-    const left = a % 2 === 1 && b % 2 === 1;
-    ctx.strokeStyle = left ? '#22d3ee' : a % 2 === 0 && b % 2 === 0 ? '#f97316' : '#e5e7eb';
+    if (a === 0 || b === 0) continue;
+    ctx.strokeStyle = a % 2 === 1 && b % 2 === 1 ? '#5EC8F2' : a % 2 === 0 && b % 2 === 0 ? '#F5A04A' : '#E8EDF5';
     const [ax, ay] = P(a), [bx, by] = P(b);
     ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(bx, by); ctx.stroke();
   }
-  for (let i = 0; i < 33; i++) {
-    const vis = t.px[f * STRIDE + i * 4 + 3];
-    const [x, y] = P(i);
-    ctx.fillStyle = vis > 0.5 ? '#fff' : '#ef4444';
-    ctx.fillRect(x - 2, y - 2, 4, 4);
-  }
 }
 
-async function finish(ex: Extractor) {
+async function finish(ex: Extractor, file: File, runTags: ClipTags, timing: TimingSettings, win: { start: number; end: number }) {
   if (!clip) return;
-  const t = ex.track;
-  let det = 0, dup = 0;
-  for (let i = 0; i < t.nFrames; i++) { det += t.detected[i]; dup += t.duplicate[i]; }
-  const vis = (a: number, b: number) => `L ${fmt(meanVisibility(t, a), 2)} / R ${fmt(meanVisibility(t, b), 2)}`;
-  const record: SessionRecord = {
+  $('run-status').textContent = 'Measuring your stride…';
+  const rec: SessionRecord = {
     id: crypto.randomUUID(),
     createdAt: Date.now(),
-    video: { name: clip.file.name, size: clip.file.size, lastModified: clip.file.lastModified, durationS: clip.durationS, nSamples: clip.nSamples, codec: clip.codec },
-    tags: tags(),
-    timing: timingSettings(),
-    trim: { presStart: trim.start, presEnd: trim.end },
+    video: { name: file.name, size: file.size, lastModified: file.lastModified, durationS: clip.durationS, nSamples: clip.nSamples, codec: clip.codec },
+    tags: runTags,
+    timing,
+    trim: { presStart: win.start, presEnd: win.end },
     extraction: ex.stats,
-    dupThreshold: settings.dupThreshold,
-    track: t,
+    dupThreshold: DUP_THRESHOLD,
+    track: ex.track,
+    heightCm: settings.heightCm,
   };
-  let saved = '';
   try {
-    await saveSession(record);
-    saved = '<span class="ok">saved to this device</span>';
+    const g = analyze(rec);
+    const rep = poseReport(g);
+    rec.score = rep.overall;
+    rec.grade = rep.grade;
+    $('run-status').textContent = 'Drawing key moments…';
+    try { rec.stills = await renderStills(file, rec.track, g); } catch (e) { console.warn('stills failed', e); }
   } catch (e) {
-    saved = `<span class="bad">save failed: ${esc(String(e))}</span>`;
+    console.error(e);
   }
-  kv($('result-table'), [
-    ['Frames processed', `${t.nFrames}`],
-    ['Pose detected', `${det} (${fmt((100 * det) / t.nFrames, 1)} %)`],
-    ['Duplicate frames in window', String(dup)],
-    ['Extraction path', ex.stats.path + (ex.stats.path === 'seek' ? ` (${ex.stats.unverifiedFrames} unverified seeks)` : '')],
-    ['Model / delegate', `${ex.stats.model} / ${ex.stats.delegate}${ex.stats.gpuError ? ` <span class="warn">(GPU: ${esc(ex.stats.gpuError)})</span>` : ''}`],
-    ['Processing time', `${fmtDuration(ex.stats.elapsedS)} (${fmt(t.nFrames / ex.stats.elapsedS, 1)} frames/s)${ex.stats.pauses ? `, paused ${ex.stats.pauses}×` : ''}`],
-    ['Real-time span', `${fmt(t.realTimeS[t.nFrames - 1], 3)} s at ×${record.timing.slowmoFactor} slow-mo, ${record.timing.captureFps} fps capture`],
-    ['Mean visibility heel', vis(LM.L_HEEL, LM.R_HEEL)],
-    ['Mean visibility foot index', vis(LM.L_FOOT_INDEX, LM.R_FOOT_INDEX)],
-    ['Mean visibility knee', vis(LM.L_KNEE, LM.R_KNEE)],
-    ['Session', saved],
-  ]);
-  $('sec-result').hidden = false;
-  void renderSessions();
+  try { await saveSession(rec); } catch (e) { console.warn('save failed', e); }
+  await openReport(rec, file);
 }
 
-// ---------- saved sessions ----------
-async function renderSessions() {
-  const el = $('sessions');
-  let list: SessionRecord[] = [];
-  try { list = await listSessions(); } catch (e) { el.textContent = `Storage unavailable: ${String(e)}`; return; }
-  if (!list.length) { el.innerHTML = '<p class="muted">None yet.</p>'; return; }
-  el.innerHTML = list.reverse().map((s) => {
-    let det = 0;
-    for (let i = 0; i < s.track.nFrames; i++) det += s.track.detected[i];
-    return `<div class="session"><b>${esc(s.video.name)}</b> · ${new Date(s.createdAt).toLocaleString()}<br>` +
-      `${s.tags.view} · ${s.tags.surface}${s.tags.treadmillSpeedMps ? ` @ ${fmt(s.tags.treadmillSpeedMps * 3.6, 1)} km/h` : ''} · ` +
-      `${s.track.nFrames} frames (${det} with pose) · ${s.timing.captureFps} fps ×${s.timing.slowmoFactor} · ${s.extraction.path} · ${s.extraction.model}` +
-      `<div class="row"><button type="button" data-del="${s.id}">Delete</button></div></div>`;
-  }).join('');
-  el.querySelectorAll<HTMLButtonElement>('button[data-del]').forEach((b) =>
-    b.addEventListener('click', async () => {
-      if (!confirm('Delete this session?')) return;
-      await deleteSession(b.dataset.del!);
-      void renderSessions();
-    }));
+// ---------- report ----------
+function analyze(rec: SessionRecord): GaitResult {
+  return analyzeGait(rec.track, rec.tags.view, { heightCm: rec.heightCm ?? settings.heightCm });
 }
+
+async function openReport(rec: SessionRecord, file: File | null) {
+  let g: GaitResult, rep: PoseReport;
+  try {
+    g = analyze(rec);
+    rep = poseReport(g);
+  } catch (e) {
+    $('report').innerHTML = `<p class="empty">This run couldn’t be analyzed: ${esc(String(e))}</p>`;
+    show('report', 'Report');
+    return;
+  }
+  const notes: string[] = [];
+  if (rec.timing.captureFps < 100) notes.push(`Filmed at ${Math.round(rec.timing.captureFps)} fps, so timing values are approximate.`);
+  const input = () => ({
+    rep, g, stills: rec.stills ?? {}, createdAt: rec.createdAt, clipName: rec.video.name, hasVideo: !!file, notes,
+  });
+  let sharing = false;
+  const sharePdf = async (btn: HTMLButtonElement) => {
+    if (sharing) return;
+    sharing = true;
+    const label = btn.textContent;
+    const status = document.querySelector<HTMLElement>('.share-status');
+    btn.textContent = 'Making PDF…';
+    btn.disabled = true;
+    try {
+      const { buildReportPdf, pdfFileName } = await import('./ui/pdf');
+      const { shareFile } = await import('./share');
+      const blob = buildReportPdf({ ...input(), surface: rec.tags.surface });
+      const score = Number.isFinite(rep.overall) ? `${Math.round(rep.overall)}/100` : '';
+      const outcome = await shareFile(blob, pdfFileName(rec.createdAt), 'RunForm analysis', `My RunForm running analysis${score ? `: ${score}, ${rep.grade}` : ''}.`);
+      if (status) status.textContent = outcome === 'downloaded' ? 'PDF downloaded.' : '';
+    } catch (e) {
+      console.error(e);
+      if (status) status.innerHTML = `<span class="bad">Couldn’t share the PDF: ${esc(String(e))}</span>`;
+    } finally {
+      btn.textContent = label;
+      btn.disabled = false;
+      sharing = false;
+    }
+  };
+  const render = () => {
+    $('report').innerHTML = reportHTML(input());
+    wireReport($('report'));
+    document.querySelectorAll<HTMLButtonElement>('.share-pdf').forEach((b) => b.addEventListener('click', () => void sharePdf(b)));
+    $('delete-btn').addEventListener('click', async () => {
+      if (!confirm('Delete this run? This can’t be undone.')) return;
+      await deleteSession(rec.id);
+      show('home');
+      document.body.classList.add('at-home');
 void renderSessions();
 
-// ---------- offline status ----------
-function renderOnline() {
-  $('offline-status').textContent = navigator.onLine ? '' : 'offline';
+if (import.meta.env.DEV && location.hash === '#demo') {
+  void import('./dev/demo').then(({ synthRunner }) => {
+    const track = synthRunner({ cadence: 166, duty: 0.36, landingPx: 230, noise: 2 });
+    const rec = {
+      id: 'demo', createdAt: Date.now(),
+      video: { name: 'IMG_4182.MOV', size: 1, lastModified: 0, durationS: 6, nSamples: track.nFrames, codec: 'hvc1' },
+      tags: { view: 'SAGITTAL', surface: 'TREADMILL', treadmillSpeedMps: null }, timing: { captureFps: 240, slowmoFactor: 1 },
+      trim: { presStart: 0, presEnd: track.nFrames - 1 }, extraction: { delegate: 'GPU', model: 'heavy', path: 'webcodecs', unverifiedFrames: 0, elapsedS: 1, pauses: 0 },
+      dupThreshold: 3, track, heightCm: 183,
+    } as SessionRecord;
+    const fake = (label: string) => {
+      const c = document.createElement('canvas'); c.width = 540; c.height = 720;
+      const x = c.getContext('2d')!; x.fillStyle = '#2a3852'; x.fillRect(0, 0, 540, 720);
+      x.fillStyle = '#fff'; x.font = '40px sans-serif'; x.fillText(label, 40, 360);
+      return c.toDataURL('image/jpeg', 0.8);
+    };
+    rec.stills = { landing: fake('landing'), pose: fake('pose'), fall: fake('fall') };
+    void openReport(rec, null);
+  });
 }
+    });
+    const reopen = document.getElementById('reopen-input') as HTMLInputElement | null;
+    reopen?.addEventListener('change', async () => {
+      const f = reopen.files?.[0];
+      if (!f) return;
+      if (!matchesVideoRef(rec.video, f)) {
+        const slot = $('player-slot');
+        slot.insertAdjacentHTML('afterbegin', `<p class="callout callout-warn">That’s a different video from the one analyzed (${esc(rec.video.name)}).</p>`);
+        return;
+      }
+      file = f;
+      if (!rec.stills || !Object.keys(rec.stills).length) {
+        try { rec.stills = await renderStills(f, rec.track, g); await saveSession(rec); } catch (e) { console.warn(e); }
+      }
+      render();
+    });
+    if (file) {
+      player?.destroy();
+      player = new Player(file, rec.track, g, rec.timing.slowmoFactor);
+      $('player-slot').appendChild(player.el);
+    }
+  };
+  render();
+  show('report', 'Your report');
+  if (rec.score === undefined && Number.isFinite(rep.overall)) {
+    rec.score = rep.overall;
+    rec.grade = rep.grade;
+    try { await saveSession(rec); } catch { /* ignore */ }
+  }
+}
+
+// ---------- boot ----------
+function renderOnline() { $('offline-status').textContent = navigator.onLine ? '' : 'Offline'; }
 addEventListener('online', renderOnline);
 addEventListener('offline', renderOnline);
 renderOnline();
+document.body.classList.add('at-home');
+void renderSessions();
+
+if (import.meta.env.DEV && location.hash === '#demo') {
+  void import('./dev/demo').then(({ synthRunner }) => {
+    const track = synthRunner({ cadence: 166, duty: 0.36, landingPx: 230, noise: 2 });
+    const rec = {
+      id: 'demo', createdAt: Date.now(),
+      video: { name: 'IMG_4182.MOV', size: 1, lastModified: 0, durationS: 6, nSamples: track.nFrames, codec: 'hvc1' },
+      tags: { view: 'SAGITTAL', surface: 'TREADMILL', treadmillSpeedMps: null }, timing: { captureFps: 240, slowmoFactor: 1 },
+      trim: { presStart: 0, presEnd: track.nFrames - 1 }, extraction: { delegate: 'GPU', model: 'heavy', path: 'webcodecs', unverifiedFrames: 0, elapsedS: 1, pauses: 0 },
+      dupThreshold: 3, track, heightCm: 183,
+    } as SessionRecord;
+    const fake = (label: string) => {
+      const c = document.createElement('canvas'); c.width = 540; c.height = 720;
+      const x = c.getContext('2d')!; x.fillStyle = '#2a3852'; x.fillRect(0, 0, 540, 720);
+      x.fillStyle = '#fff'; x.font = '40px sans-serif'; x.fillText(label, 40, 360);
+      return c.toDataURL('image/jpeg', 0.8);
+    };
+    rec.stills = { landing: fake('landing'), pose: fake('pose'), fall: fake('fall') };
+    void openReport(rec, null);
+  });
+}

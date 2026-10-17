@@ -6,8 +6,29 @@ Pose estimation uses MediaPipe PoseLandmarker. The model files and the WASM runt
 bundled with the app and precached by the service worker, so after the first load the app
 works offline.
 
-**Status: Phase 1 of 7.** Phase 1 covers import, file diagnostics, slow-mo timing and trim,
-pose extraction (WebCodecs with a seek fallback), wake lock, PWA setup and deploy.
+**Status:** import, slow-mo timing and auto-trim, pose extraction (WebCodecs with a seek
+fallback), gait event detection, Pose Method scoring with coaching feedback and drills,
+annotated key frames, and a slow-motion player with a live skeleton overlay.
+
+## What the report measures (side view)
+
+The stride is scored in the Pose Method's three parts. Each part averages its metrics, and
+each metric scores 100 inside its guide range, falling to 60 at the edge of the "close"
+range and to 0 beyond it. Ranges live in `src/analysis/posemethod.ts`.
+
+| Part | Metrics |
+|---|---|
+| **Pose** | landing distance ahead of the hips, shin angle at landing, foot strike, knee bend at landing, trunk lean |
+| **Fall** | fall angle (ball of foot → hips as the heel lifts), push-off angle at toe-off, vertical bounce |
+| **Pull** | swing ankle position in the Pose, heel pull height (peak swing knee bend), ground contact time, cadence |
+
+Front/back clips report crossover, hip drop, step width, contact time and cadence.
+
+Foot contacts come from foot height above a local ground level (hysteresis, scaled by leg
+length), validated by the foot moving backward relative to the hips. Landmark trajectories
+are low-pass filtered (zero-phase Butterworth: 8 Hz for angles, 16 Hz for events), short
+left/right leg swaps from the tracker are corrected, and distances are scaled from the
+runner's height (thigh + shank ≈ 0.491 × height, Winter 2009).
 
 ## Recording a good clip
 

@@ -34,6 +34,13 @@ export interface SessionRecord {
   extraction: ExtractStats;
   dupThreshold: number;
   track: PoseTrack;
+  /** Runner height used for scaling (cm). Older sessions fall back to the current setting. */
+  heightCm?: number;
+  /** Cached headline result for the history list. */
+  score?: number;
+  grade?: string;
+  /** Annotated key-frame JPEGs (data URLs). */
+  stills?: Partial<Record<'landing' | 'pose' | 'fall', string>>;
 }
 
 interface RunFormDB extends DBSchema {

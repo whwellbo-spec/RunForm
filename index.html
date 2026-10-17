@@ -3,152 +3,165 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
-    <meta name="theme-color" content="#1d4ed8" />
+    <meta name="theme-color" content="#EEF1F4" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#0F1726" media="(prefers-color-scheme: dark)" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
     <link rel="apple-touch-icon" href="icon-180.png" />
     <link rel="icon" href="icon-192.png" />
     <title>RunForm</title>
   </head>
   <body>
-    <header>
-      <h1>RunForm</h1>
-      <span id="offline-status" class="muted"></span>
+    <header class="topbar">
+      <button id="back-btn" type="button" class="icon-btn" aria-label="Back" hidden>
+        <svg viewBox="0 0 24 24" width="22" height="22" aria-hidden="true"><path d="M15 5l-7 7 7 7" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/></svg>
+      </button>
+      <span id="topbar-title" class="topbar-title">RunForm</span>
+      <span id="offline-status" class="topbar-note"></span>
     </header>
 
-    <section id="sec-import">
-      <h2>1. Import</h2>
-      <label class="file-btn">
-        Choose video…
-        <input id="file-input" type="file" accept="video/*,.mov,.mp4,.m4v" />
-      </label>
-      <p class="hint">Save the clip to the Files app first and pick it from there — picking from Photos may transcode it and drop frames.</p>
-      <details>
-        <summary>Settings</summary>
-        <div class="grid">
-          <label>Pose model
-            <select id="model-select">
-              <option value="heavy">Heavy (accurate, default)</option>
-              <option value="full">Full (faster, quick checks)</option>
+    <main>
+      <!-- ============ HOME ============ -->
+      <section id="v-home" class="view">
+        <div class="home-hero">
+          <h1 class="wordmark">RunForm</h1>
+          <p class="lede">Film yourself running from the side. RunForm tracks your body, scores your stride against the Pose Method and tells you what to drill.</p>
+          <label class="btn btn-primary btn-block">
+            Analyze a run
+            <input id="file-input" type="file" accept="video/*,.mov,.mp4,.m4v" />
+          </label>
+          <p id="import-status" class="status"></p>
+        </div>
+
+        <details class="guide">
+          <summary>How to film a good clip</summary>
+          <ul class="guide-list">
+            <li><b>From the side.</b> Phone on a tripod or ledge at hip height, 3–5 m away, square to your running direction.</li>
+            <li><b>Slo-mo.</b> Use the Camera app’s Slo-mo mode (240 fps is best).</li>
+            <li><b>Whole body in frame</b> the entire time, with space above your head and below your feet.</li>
+            <li><b>Steady pace.</b> On a treadmill, 10–20 s at your usual easy pace. Outdoors, run past the camera a few times.</li>
+            <li><b>Bright light and fitted clothes</b> so your knees, ankles and feet are easy to see.</li>
+            <li><b>Save to Files first.</b> In Photos tap Share → Save to Files, then pick it from Files here. Picking straight from Photos can drop frames.</li>
+          </ul>
+        </details>
+
+        <h2 class="section-title">Past runs</h2>
+        <div id="sessions" class="session-list"></div>
+      </section>
+
+      <!-- ============ SETUP ============ -->
+      <section id="v-setup" class="view" hidden>
+        <div class="media-frame">
+          <video id="trim-video" muted playsinline preload="auto"></video>
+        </div>
+        <p id="clip-line" class="clip-line"></p>
+        <p id="clip-warning" class="callout callout-warn" hidden></p>
+
+        <div class="field">
+          <span class="field-label">Camera view</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="view" value="SAGITTAL" checked /><span>Side</span></label>
+            <label><input type="radio" name="view" value="FRONTAL" /><span>Front or back</span></label>
+          </div>
+          <p id="view-hint" class="field-hint">Side view is needed for the Pose, Fall and Pull scores.</p>
+        </div>
+
+        <div class="field">
+          <span class="field-label">Where</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="surface" value="TREADMILL" checked /><span>Treadmill</span></label>
+            <label><input type="radio" name="surface" value="OVERGROUND" /><span>Outdoors / track</span></label>
+          </div>
+          <div id="speed-row" class="inline-inputs">
+            <input id="belt-speed" type="number" min="0" step="0.1" inputmode="decimal" placeholder="Speed (optional)" />
+            <select id="speed-unit" aria-label="Speed unit">
+              <option value="mph">mph</option>
+              <option value="kmh">km/h</option>
             </select>
-          </label>
-          <label>Duplicate threshold (max pixel diff, 0–255)
-            <input id="dup-threshold" type="number" min="0" max="50" step="1" value="3" />
-          </label>
+          </div>
         </div>
-      </details>
-      <div id="import-status" class="status"></div>
-    </section>
 
-    <section id="sec-diag" hidden>
-      <h2>2. File diagnostics</h2>
-      <table id="diag-table" class="kv"></table>
-      <h3>Frame-to-frame intervals (whole file, media time)</h3>
-      <div id="diag-hist" class="hist"></div>
-      <h3>Duplicate frames</h3>
-      <div id="scan-status" class="status"></div>
-      <progress id="scan-progress" max="1" value="0" hidden></progress>
-      <div class="row">
-        <button id="scan-btn" type="button">Scan for duplicates</button>
-        <button id="scan-cancel" type="button" hidden>Cancel scan</button>
-      </div>
-    </section>
-
-    <section id="sec-timing" hidden>
-      <h2>3. Timing &amp; trim</h2>
-      <p id="timing-guess" class="note"></p>
-      <div class="grid">
-        <label>Capture frame rate (real fps)
-          <input id="capture-fps" type="number" min="1" max="1000" step="any" />
-        </label>
-        <label>Slow-mo factor (file timeline ÷ real time)
-          <input id="slowmo-factor" type="number" min="0.01" max="64" step="any" />
-        </label>
-      </div>
-      <div id="timing-readout" class="readout"></div>
-
-      <video id="trim-video" muted playsinline preload="auto"></video>
-      <div class="trim">
-        <label>Start frame <output id="trim-start-out"></output>
-          <input id="trim-start" type="range" min="0" value="0" step="1" />
-        </label>
-        <div class="row">
-          <button type="button" data-trim="start" data-delta="-10">−10</button>
-          <button type="button" data-trim="start" data-delta="-1">−1</button>
-          <input id="trim-start-num" type="number" min="0" step="1" inputmode="numeric" />
-          <button type="button" data-trim="start" data-delta="1">+1</button>
-          <button type="button" data-trim="start" data-delta="10">+10</button>
+        <div class="field">
+          <span class="field-label">Your height</span>
+          <div class="inline-inputs">
+            <input id="height-input" type="number" min="100" max="230" step="0.5" inputmode="decimal" />
+            <select id="height-unit" aria-label="Height unit">
+              <option value="in">in</option>
+              <option value="cm">cm</option>
+            </select>
+          </div>
+          <p class="field-hint">Used to turn pixels into centimetres.</p>
         </div>
-        <label>End frame <output id="trim-end-out"></output>
-          <input id="trim-end" type="range" min="0" value="0" step="1" />
-        </label>
-        <div class="row">
-          <button type="button" data-trim="end" data-delta="-10">−10</button>
-          <button type="button" data-trim="end" data-delta="-1">−1</button>
-          <input id="trim-end-num" type="number" min="0" step="1" inputmode="numeric" />
-          <button type="button" data-trim="end" data-delta="1">+1</button>
-          <button type="button" data-trim="end" data-delta="10">+10</button>
+
+        <details class="drawer">
+          <summary>Choose the section to analyze</summary>
+          <div class="trim">
+            <label class="range-label">Start <output id="trim-start-out"></output>
+              <input id="trim-start" type="range" min="0" value="0" step="1" />
+            </label>
+            <label class="range-label">End <output id="trim-end-out"></output>
+              <input id="trim-end" type="range" min="0" value="0" step="1" />
+            </label>
+            <div class="btn-row">
+              <button id="trim-auto" type="button" class="btn btn-quiet">Best section</button>
+              <button id="trim-all" type="button" class="btn btn-quiet">Whole clip</button>
+            </div>
+          </div>
+        </details>
+
+        <details class="drawer">
+          <summary>Advanced</summary>
+          <div class="adv-grid">
+            <label>Tracking model
+              <select id="model-select">
+                <option value="heavy">Accurate (slower)</option>
+                <option value="full">Fast</option>
+              </select>
+            </label>
+            <label>Capture frame rate
+              <input id="capture-fps" type="number" min="1" max="1000" step="any" />
+            </label>
+            <label>Slow-mo factor
+              <input id="slowmo-factor" type="number" min="0.01" max="64" step="any" />
+            </label>
+            <label>Frame reading
+              <select id="path-select">
+                <option value="auto">Automatic</option>
+                <option value="seek">Compatibility mode</option>
+              </select>
+            </label>
+          </div>
+          <p id="timing-readout" class="fine"></p>
+          <table id="diag-table" class="kv"></table>
+        </details>
+
+        <div class="sticky-cta">
+          <button id="run-btn" type="button" class="btn btn-primary btn-block">Analyze</button>
         </div>
-        <div class="row">
-          <button id="trim-auto" type="button">Auto: longest uniform section</button>
-          <button id="trim-all" type="button">Whole clip</button>
+      </section>
+
+      <!-- ============ PROCESSING ============ -->
+      <section id="v-run" class="view" hidden>
+        <div class="media-frame">
+          <canvas id="preview" class="preview"></canvas>
         </div>
-      </div>
-      <h3>Trimmed window</h3>
-      <table id="window-table" class="kv"></table>
-      <div id="window-hist" class="hist"></div>
-    </section>
-
-    <section id="sec-tags" hidden>
-      <h2>4. Clip tags</h2>
-      <fieldset>
-        <legend>View</legend>
-        <label class="radio"><input type="radio" name="view" value="SAGITTAL" checked /> Sagittal (side)</label>
-        <label class="radio"><input type="radio" name="view" value="FRONTAL" /> Frontal (front/rear)</label>
-      </fieldset>
-      <fieldset>
-        <legend>Surface</legend>
-        <label class="radio"><input type="radio" name="surface" value="TREADMILL" checked /> Treadmill</label>
-        <label class="radio"><input type="radio" name="surface" value="OVERGROUND" /> Overground</label>
-        <div id="speed-row" class="row">
-          <label>Belt speed <input id="belt-speed" type="number" min="0" step="0.1" inputmode="decimal" /></label>
-          <select id="speed-unit">
-            <option value="kmh">km/h</option>
-            <option value="mph">mph</option>
-            <option value="mps">m/s</option>
-          </select>
+        <div class="progress-block">
+          <div class="progress-num"><span id="run-pct">0</span><span class="pct">%</span></div>
+          <div class="meter"><div id="run-meter" class="meter-fill"></div></div>
+          <p id="run-status" class="status"></p>
+          <p class="fine">Keep RunForm open — the screen stays awake while it works.</p>
         </div>
-      </fieldset>
-    </section>
+        <div class="btn-row">
+          <button id="pause-btn" type="button" class="btn btn-quiet">Pause</button>
+          <button id="resume-btn" type="button" class="btn btn-primary" hidden>Resume</button>
+          <button id="cancel-btn" type="button" class="btn btn-quiet">Cancel</button>
+        </div>
+      </section>
 
-    <section id="sec-process" hidden>
-      <h2>5. Pose extraction</h2>
-      <table id="path-table" class="kv"></table>
-      <label>Extraction path
-        <select id="path-select">
-          <option value="auto">Auto (WebCodecs if supported)</option>
-          <option value="seek">Force seek fallback</option>
-        </select>
-      </label>
-      <div class="row">
-        <button id="run-btn" type="button" class="primary">Start extraction</button>
-        <button id="pause-btn" type="button" hidden>Pause</button>
-        <button id="resume-btn" type="button" hidden>Resume</button>
-        <button id="cancel-btn" type="button" hidden>Cancel</button>
-      </div>
-      <progress id="run-progress" max="1" value="0"></progress>
-      <div id="run-status" class="readout"></div>
-      <canvas id="preview" class="preview"></canvas>
-    </section>
-
-    <section id="sec-result" hidden>
-      <h2>6. Extraction result</h2>
-      <table id="result-table" class="kv"></table>
-    </section>
-
-    <section id="sec-sessions">
-      <h2>Saved sessions</h2>
-      <div id="sessions"></div>
-    </section>
+      <!-- ============ REPORT ============ -->
+      <section id="v-report" class="view" hidden>
+        <div id="report"></div>
+      </section>
+    </main>
 
     <script type="module" src="/src/main.ts"></script>
   </body>

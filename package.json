@@ -17,9 +17,12 @@
   "dependencies": {
     "@capacitor-community/keep-awake": "^8.0.1",
     "@capacitor/core": "^8.5.3",
+    "@capacitor/filesystem": "^8.1.5",
     "@capacitor/ios": "^8.5.3",
+    "@capacitor/share": "^8.0.3",
     "@mediapipe/tasks-vision": "1.1.1",
     "idb": "^8.0.4",
+    "jspdf": "^4.2.1",
     "mp4box": "^2.4.1"
   },
   "devDependencies": {
