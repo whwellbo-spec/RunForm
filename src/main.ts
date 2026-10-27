@@ -2,7 +2,8 @@ import './style.css';
 import { CONNECTIONS, offset, type PoseTrack } from './analysis/landmarks';
 import { analyzeGait, type GaitResult } from './analysis/metrics';
 import { poseReport, type PoseReport } from './analysis/posemethod';
-import { checkTiming, guessTiming, intervals, intervalStats, longestUniformRun, type TimingSettings } from './analysis/timing';
+import { checkSlowmo, retime } from './analysis/slowmo';
+import { checkTiming, guessTiming, intervals, intervalStats, longestUniformRun, snapFps, type TimingSettings } from './analysis/timing';
 import { webCodecsSupport } from './media/decode';
 import { demux, type ClipInfo } from './media/demux';
 import type { ExtractionPath } from './media/frames';
@@ -19,9 +20,9 @@ const fmt = (v: number, d = 1) => (Number.isFinite(v) ? v.toFixed(d) : '–');
 
 // ---------- settings (per-device conveniences) ----------
 const SETTINGS_KEY = 'runform.settings';
-interface Settings { model: ModelVariant; speedUnit: string; heightCm: number; heightUnit: 'cm' | 'in' }
+interface Settings { model: ModelVariant; speedUnit: string; heightCm: number; heightUnit: 'cm' | 'in'; /** Remembered slo-mo capture rate (0 = normal speed). */ slowmo: number }
 function loadSettings(): Settings {
-  const d: Settings = { model: 'heavy', speedUnit: 'mph', heightCm: 175, heightUnit: 'in' };
+  const d: Settings = { model: 'heavy', speedUnit: 'mph', heightCm: 175, heightUnit: 'in', slowmo: 240 };
   try { return { ...d, ...JSON.parse(localStorage.getItem(SETTINGS_KEY) ?? '{}') }; } catch { return d; }
 }
 const settings = loadSettings();
@@ -35,6 +36,8 @@ const DUP_THRESHOLD = 3;
 let clip: ClipInfo | null = null;
 let wcSupport = { supported: false, reason: '' };
 let trim = { start: 0, end: 0 };
+/** Frame rate of the file's own timeline (before any slow-mo conversion). */
+let fileFps = 30;
 let extractor: Extractor | null = null;
 let player: Player | null = null;
 const wake = new WakeLockKeeper();
@@ -116,22 +119,67 @@ async function importFile(file: File) {
   wcSupport = await webCodecsSupport(clip);
 
   const allStats = intervalStats(intervals(clip.presTimeS));
+  fileFps = snapFps(allStats.fps);
   const guess = guessTiming(allStats.fps, clip.slowmoHints.length > 0);
-  $<HTMLInputElement>('capture-fps').value = String(guess.captureFps);
-  $<HTMLInputElement>('slowmo-factor').value = String(guess.slowmoFactor);
+  console.info('[RunForm] clip timing', {
+    name: file.name, codec: clip.codec, frames: clip.nSamples, durationS: clip.durationS, fileFps: allStats.fps,
+    uniform: allStats.uniformFraction, slowmoHints: clip.slowmoHints, brands: clip.brands, guess,
+  });
+
+  // A file whose own timeline is already high-rate needs no conversion.
+  // Anything ~30/60 fps may be retimed slo-mo: use the remembered choice
+  // (the post-analysis stride check catches a wrong guess either way).
+  const field = $('slowmo-field');
+  field.hidden = guess.kind === 'native-high-fps';
+  if (guess.kind === 'native-high-fps') {
+    applyTiming(guess.captureFps, 1);
+  } else {
+    const capture = guess.kind === 'retimed-slowmo' ? guess.captureFps : settings.slowmo;
+    setFilmedIn(capture);
+  }
 
   const tv = $<HTMLVideoElement>('trim-video');
+  previewBusy = false;
+  previewPending = null;
   if (tv.src) URL.revokeObjectURL(tv.src);
   tv.src = URL.createObjectURL(file);
+  tv.load();
   for (const id of ['trim-start', 'trim-end']) $<HTMLInputElement>(id).max = String(clip.nSamples - 1);
-
-  const warn = $('clip-warning');
-  warn.hidden = guess.captureFps >= 100;
-  warn.textContent = `This looks like a normal-speed video (${Math.round(guess.captureFps)} fps). It will work, but foot contacts are only accurate to about ${Math.round(1000 / guess.captureFps)} ms. Slo-mo (240 fps) gives much better results.`;
 
   bestSection();
   renderDiagnostics();
   show('setup', 'New analysis');
+}
+
+/** Set capture fps + slow-mo factor, sync the "Filmed in" choice and the warning. */
+function applyTiming(captureFps: number, factor: number) {
+  $<HTMLInputElement>('capture-fps').value = String(snapFps(captureFps));
+  $<HTMLInputElement>('slowmo-factor').value = String(factor);
+  syncSlowmoUI();
+}
+
+function syncSlowmoUI() {
+  const s = timingSettings();
+  const capture = s.slowmoFactor > 1 ? Math.round(s.captureFps) : 0;
+  document.querySelectorAll<HTMLInputElement>('input[name=slowmo]').forEach((r) => { r.checked = +r.value === capture; });
+  const warn = $('clip-warning');
+  warn.hidden = s.captureFps >= 100;
+  warn.textContent = `Treating this as a normal-speed ${Math.round(s.captureFps)} fps video. Foot contacts are only accurate to about ${Math.round(1000 / s.captureFps)} ms. If you filmed in slo-mo, pick it below.`;
+}
+
+document.querySelectorAll<HTMLInputElement>('input[name=slowmo]').forEach((r) => r.addEventListener('change', () => {
+  if (!r.checked) return;
+  const f = +r.value;
+  settings.slowmo = f;
+  storeSettings();
+  setFilmedIn(f);
+  bestSection();
+}));
+
+/** "Filmed in" choice: 0 = normal speed, else the slo-mo capture rate. */
+function setFilmedIn(capture: number) {
+  const factor = capture > fileFps ? capture / fileFps : 1;
+  applyTiming(factor > 1 ? capture : fileFps, factor);
 }
 
 function bestSection() {
@@ -167,6 +215,11 @@ function setTrim(start: number, end: number, focus: 'start' | 'end') {
 
 let previewPending: number | null = null;
 let previewBusy = false;
+/**
+ * Show frame p in the setup preview. iOS ignores a seek issued before the
+ * video has metadata (no 'seeked' ever fires), which used to leave the
+ * preview black and stuck, so wait for metadata and time out every step.
+ */
 function previewFrame(p: number) {
   if (!clip) return;
   previewPending = p;
@@ -174,13 +227,26 @@ function previewFrame(p: number) {
   const tv = $<HTMLVideoElement>('trim-video');
   const go = () => {
     if (previewPending === null || !clip) { previewBusy = false; return; }
+    previewBusy = true;
+    if (tv.readyState < HTMLMediaElement.HAVE_METADATA) {
+      let timer = 0;
+      const ready = () => { clearTimeout(timer); tv.removeEventListener('loadedmetadata', ready); tv.removeEventListener('error', ready); go(); };
+      tv.addEventListener('loadedmetadata', ready);
+      tv.addEventListener('error', ready);
+      timer = window.setTimeout(() => {
+        tv.removeEventListener('loadedmetadata', ready); tv.removeEventListener('error', ready);
+        previewBusy = false; // give up quietly; the next trim change retries
+      }, 4000);
+      return;
+    }
     const q = previewPending;
     previewPending = null;
-    previewBusy = true;
     const t = clip.presTimeS[q];
     const next = clip.presTimeS[Math.min(clip.nSamples - 1, q + 1)];
-    const done = () => { tv.removeEventListener('seeked', done); go(); };
+    let timer = 0;
+    const done = () => { clearTimeout(timer); tv.removeEventListener('seeked', done); go(); };
     tv.addEventListener('seeked', done);
+    timer = window.setTimeout(done, 1500);
     tv.currentTime = t + Math.max(0, (next - t) * 0.25);
   };
   go();
@@ -222,7 +288,7 @@ $('trim-start').addEventListener('input', (e) => setTrim(+(e.target as HTMLInput
 $('trim-end').addEventListener('input', (e) => setTrim(trim.start, +(e.target as HTMLInputElement).value, 'end'));
 $('trim-auto').addEventListener('click', bestSection);
 $('trim-all').addEventListener('click', () => clip && setTrim(0, clip.nSamples - 1, 'start'));
-for (const id of ['capture-fps', 'slowmo-factor']) $(id).addEventListener('input', () => { renderClipLine(); setTrim(trim.start, trim.end, 'start'); });
+for (const id of ['capture-fps', 'slowmo-factor']) $(id).addEventListener('input', () => { syncSlowmoUI(); renderClipLine(); setTrim(trim.start, trim.end, 'start'); });
 
 $<HTMLSelectElement>('model-select').value = settings.model;
 $('model-select').addEventListener('change', (e) => { settings.model = (e.target as HTMLSelectElement).value as ModelVariant; storeSettings(); renderClipLine(); });
@@ -410,29 +476,7 @@ async function openReport(rec: SessionRecord, file: File | null) {
       if (!confirm('Delete this run? This can’t be undone.')) return;
       await deleteSession(rec.id);
       show('home');
-      document.body.classList.add('at-home');
-void renderSessions();
-
-if (import.meta.env.DEV && location.hash === '#demo') {
-  void import('./dev/demo').then(({ synthRunner }) => {
-    const track = synthRunner({ cadence: 166, duty: 0.36, landingPx: 230, noise: 2 });
-    const rec = {
-      id: 'demo', createdAt: Date.now(),
-      video: { name: 'IMG_4182.MOV', size: 1, lastModified: 0, durationS: 6, nSamples: track.nFrames, codec: 'hvc1' },
-      tags: { view: 'SAGITTAL', surface: 'TREADMILL', treadmillSpeedMps: null }, timing: { captureFps: 240, slowmoFactor: 1 },
-      trim: { presStart: 0, presEnd: track.nFrames - 1 }, extraction: { delegate: 'GPU', model: 'heavy', path: 'webcodecs', unverifiedFrames: 0, elapsedS: 1, pauses: 0 },
-      dupThreshold: 3, track, heightCm: 183,
-    } as SessionRecord;
-    const fake = (label: string) => {
-      const c = document.createElement('canvas'); c.width = 540; c.height = 720;
-      const x = c.getContext('2d')!; x.fillStyle = '#2a3852'; x.fillRect(0, 0, 540, 720);
-      x.fillStyle = '#fff'; x.font = '40px sans-serif'; x.fillText(label, 40, 360);
-      return c.toDataURL('image/jpeg', 0.8);
-    };
-    rec.stills = { landing: fake('landing'), pose: fake('pose'), fall: fake('fall') };
-    void openReport(rec, null);
-  });
-}
+      void renderSessions();
     });
     const reopen = document.getElementById('reopen-input') as HTMLInputElement | null;
     reopen?.addEventListener('change', async () => {
@@ -456,12 +500,55 @@ if (import.meta.env.DEV && location.hash === '#demo') {
     }
   };
   render();
+  showSlowmoCheck(rec, file);
   show('report', 'Your report');
   if (rec.score === undefined && Number.isFinite(rep.overall)) {
     rec.score = rep.overall;
     rec.grade = rep.grade;
     try { await saveSession(rec); } catch { /* ignore */ }
   }
+}
+
+/**
+ * Compare the runner's stride rhythm with the slow-mo factor used. If the
+ * cadence only makes sense at another factor, offer a one-tap fix: the
+ * landmarks don't change, only the real-time stamps, so no re-tracking.
+ */
+function showSlowmoCheck(rec: SessionRecord, file: File | null) {
+  if (rec.timing.captureFps / rec.timing.slowmoFactor >= 90) return; // file timeline is already real time
+  let chk: ReturnType<typeof checkSlowmo> = null;
+  try { chk = checkSlowmo(rec.track, rec.timing.slowmoFactor); } catch (e) { console.warn('slow-mo check failed', e); }
+  console.info('[RunForm] stride check', chk);
+  if (!chk || chk.suggestedFactor === null) return;
+  const f = chk.suggestedFactor;
+  const mediaFps = rec.timing.captureFps / rec.timing.slowmoFactor;
+  const label = f === 1 ? 'normal speed' : `${Math.round(mediaFps * f)} fps slo-mo (${f}× slower)`;
+  const el = document.createElement('div');
+  el.className = 'callout callout-warn';
+  el.innerHTML = `<b>The timing looks off.</b> At the current setting your cadence would be ${Math.round(chk.cadenceSpm)} steps/min, which isn’t possible while running. Treated as ${esc(label)} it’s ${Math.round(chk.suggestedCadenceSpm)} steps/min.
+    <button type="button" class="btn btn-primary btn-block">Fix timing</button>`;
+  el.querySelector('button')!.addEventListener('click', async () => {
+    retime(rec.track, f);
+    rec.timing = { captureFps: mediaFps * f, slowmoFactor: f };
+    rec.score = undefined;
+    rec.grade = undefined;
+    settings.slowmo = f > 1 ? Math.round(mediaFps * f) : 0;
+    storeSettings();
+    try {
+      const g = analyze(rec);
+      const rep = poseReport(g);
+      rec.score = rep.overall;
+      rec.grade = rep.grade;
+      if (file) { try { rec.stills = await renderStills(file, rec.track, g); } catch (e) { console.warn('stills failed', e); } }
+    } catch (e) { console.error(e); }
+    try { await saveSession(rec); } catch (e) { console.warn('save failed', e); }
+    await openReport(rec, file);
+    const realS = rec.track.realTimeS[rec.track.nFrames - 1];
+    if (realS < 4) {
+      $('report').insertAdjacentHTML('afterbegin', `<p class="callout callout-warn">Timing fixed. Only ${fmt(realS, 1)} s of running was analyzed, so numbers may be jumpy. For steadier results, analyze the clip again; slo-mo is now the default.</p>`);
+    }
+  });
+  $('report').prepend(el);
 }
 
 // ---------- boot ----------

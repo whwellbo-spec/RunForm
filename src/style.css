@@ -255,3 +255,7 @@ table.metrics .rng { display: block; font-size: 12px; color: var(--muted); }
 
 @media (prefers-reduced-motion: reduce) { .meter-fill { transition: none; } }
 @media (max-width: 380px) { .stills { grid-template-columns: 1fr 1fr; } .score-num { font-size: 70px; } }
+
+/* Setup: keep the preview short so the timing and view choices sit above the Analyze button. */
+#v-setup .media-frame video { max-height: 38vh; }
+.callout .btn { margin-top: 10px; }

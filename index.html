@@ -56,6 +56,16 @@
         <p id="clip-line" class="clip-line"></p>
         <p id="clip-warning" class="callout callout-warn" hidden></p>
 
+        <div id="slowmo-field" class="field" hidden>
+          <span class="field-label">Filmed in</span>
+          <div class="segmented" role="radiogroup">
+            <label><input type="radio" name="slowmo" value="0" /><span>Normal</span></label>
+            <label><input type="radio" name="slowmo" value="120" /><span>Slo-mo 120</span></label>
+            <label><input type="radio" name="slowmo" value="240" /><span>Slo-mo 240</span></label>
+          </div>
+          <p class="field-hint">iPhone slo-mo picked from Photos arrives slowed down as a 30 fps video. RunForm converts it back to real time. RunForm also double-checks this from your stride after analysis.</p>
+        </div>
+
         <div class="field">
           <span class="field-label">Camera view</span>
           <div class="segmented" role="radiogroup">
