@@ -99,20 +99,33 @@ struct BodySample {
         lAnkle = p(.leftAnkle)
         rAnkle = p(.rightAnkle)
         let lh = p(.leftHip), rh = p(.rightHip)
-        if let a = lh, let b = rh { hip = CGPoint(x: (a.x + b.x) / 2, y: (a.y + b.y) / 2) } else { hip = lh ?? rh ?? p(.root) }
+        if let a = lh, let b = rh {
+            let mx: CGFloat = (a.x + b.x) / 2
+            let my: CGFloat = (a.y + b.y) / 2
+            hip = CGPoint(x: mx, y: my)
+        } else {
+            hip = lh ?? rh ?? p(.root)
+        }
         head = p(.nose) ?? p(.neck)
     }
 
     /// Head, hips and both ankles visible and not touching the frame edge.
     var wholeBody: Bool {
         guard let la = lAnkle, let ra = rAnkle, let h = head, hip != nil else { return false }
-        return [la, ra, h].allSatisfy { $0.x > 0.01 && $0.x < 0.99 && $0.y > 0.02 && $0.y < 0.98 }
+        return BodySample.inside(la) && BodySample.inside(ra) && BodySample.inside(h)
+    }
+
+    private static func inside(_ p: CGPoint) -> Bool {
+        let okX: Bool = p.x > 0.01 && p.x < 0.99
+        let okY: Bool = p.y > 0.02 && p.y < 0.98
+        return okX && okY
     }
 
     /// Hip-to-ankle length, used to scale the step threshold.
     var legLength: CGFloat {
         guard let h = hip, let la = lAnkle, let ra = rAnkle else { return 0 }
-        return abs(h.y - (la.y + ra.y) / 2)
+        let ankleY: CGFloat = (la.y + ra.y) / 2
+        return abs(h.y - ankleY)
     }
 }
 
@@ -145,20 +158,26 @@ struct StepCounter {
         }
         guard t >= 0 else { return CounterUpdate(detected: true, wholeBody: true, steps: steps, done: false) }
 
-        hist.append((t, la.x - ra.x, la.y - ra.y, s.legLength))
-        hist.removeAll { t - $0.t > 3 }
-        let leg = hist.map { $0.leg }.sorted()[hist.count / 2]
+        let dxNow: CGFloat = la.x - ra.x
+        let dyNow: CGFloat = la.y - ra.y
+        hist.append((t: t, dx: dxNow, dy: dyNow, leg: s.legLength))
+        hist.removeAll { (h) -> Bool in t - h.t > 3 }
+        let legs: [CGFloat] = hist.map { $0.leg }.sorted()
+        let leg: CGFloat = legs[legs.count / 2]
         if axis < 0, let first = hist.first, t - first.t >= 1.0 {
-            let rx = (hist.map { $0.dx }.max() ?? 0) - (hist.map { $0.dx }.min() ?? 0)
-            let ry = (hist.map { $0.dy }.max() ?? 0) - (hist.map { $0.dy }.min() ?? 0)
+            let xs: [CGFloat] = hist.map { $0.dx }
+            let ys: [CGFloat] = hist.map { $0.dy }
+            let rx: CGFloat = (xs.max() ?? 0) - (xs.min() ?? 0)
+            let ry: CGFloat = (ys.max() ?? 0) - (ys.min() ?? 0)
             if max(rx, ry) > 0.3 * leg { axis = rx >= ry ? 0 : 1 }
         }
         if axis >= 0 {
-            let v = (axis == 0 ? la.x - ra.x : la.y - ra.y) / leg
+            let raw: CGFloat = axis == 0 ? dxNow : dyNow
+            let v: CGFloat = raw / leg
             // Remove a constant offset (e.g. feet apart from the front) with the recent median.
-            let recent = hist.map { axis == 0 ? $0.dx : $0.dy }.sorted()
-            let centre = recent[recent.count / 2] / leg
-            let d = v - centre
+            let recent: [CGFloat] = (axis == 0 ? hist.map { $0.dx } : hist.map { $0.dy }).sorted()
+            let centre: CGFloat = recent[recent.count / 2] / leg
+            let d: CGFloat = v - centre
             let h: CGFloat = axis == 0 ? 0.15 : 0.06
             if state == 0 {
                 if d > h { state = 1 } else if d < -h { state = -1 }
