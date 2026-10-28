@@ -225,22 +225,63 @@ export function detectContacts(k: Kinematics, side: Side, eo: Partial<EventOptio
     const relTo = fwd(k, k.x[L.ankle][to] - hipX(k, to));
     if (o.requireBackward && !(relTo < relIc - 0.1 * k.legPx)) continue;
 
-    // Midstance: support ankle crosses under the hips.
-    let ms = -1, best = Infinity;
-    for (let f = ic; f <= to; f++) {
-      const r = fwd(k, k.x[L.ankle][f] - hipX(k, f));
-      if (Math.abs(r) < best) { best = Math.abs(r); ms = f; }
-    }
-    // Heel lift: heel rises clearly above its lowest stance position after midstance.
-    let heelMax = -Infinity;
-    for (let f = ic; f <= to; f++) heelMax = Math.max(heelMax, k.ye[L.heel][f]);
-    let heelLift = -1;
-    for (let f = ms; f <= to; f++) if (heelMax - k.ye[L.heel][f] > 0.025 * k.legPx) { heelLift = f; break; }
-    if (heelLift < 0) heelLift = Math.round(ic + 0.65 * (to - ic));
+    out.push(completeContact(k, side, ic, to));
+  }
+  return out;
+}
 
-    let v = 0, c = 0;
-    for (let f = ic; f <= to; f++) { v += (k.vis[L.heel][f] + k.vis[L.toe][f] + k.vis[L.ankle][f]) / 3; c++; }
-    out.push({ side, ic, ms, heelLift, to, confidence: c ? v / c : 0 });
+/**
+ * Fill in midstance, heel lift and confidence for a contact given its landing
+ * (ic) and toe-off (to) frames. Used for detected and hand-corrected contacts.
+ */
+export function completeContact(k: Kinematics, side: Side, ic: number, to: number): Contact {
+  const L = LEG[side];
+  ic = Math.max(0, Math.min(k.n - 1, Math.round(ic)));
+  to = Math.max(ic + 1, Math.min(k.n - 1, Math.round(to)));
+  // Midstance: support ankle crosses under the hips.
+  let ms = ic, best = Infinity;
+  for (let f = ic; f <= to; f++) {
+    const r = fwd(k, k.x[L.ankle][f] - hipX(k, f));
+    if (Math.abs(r) < best) { best = Math.abs(r); ms = f; }
+  }
+  // Heel lift: heel rises clearly above its lowest stance position after midstance.
+  let heelMax = -Infinity;
+  for (let f = ic; f <= to; f++) heelMax = Math.max(heelMax, k.ye[L.heel][f]);
+  let heelLift = -1;
+  for (let f = ms; f <= to; f++) if (heelMax - k.ye[L.heel][f] > 0.025 * k.legPx) { heelLift = f; break; }
+  if (heelLift < 0) heelLift = Math.round(ic + 0.65 * (to - ic));
+  let v = 0, c = 0;
+  for (let f = ic; f <= to; f++) { v += (k.vis[L.heel][f] + k.vis[L.toe][f] + k.vis[L.ankle][f]) / 3; c++; }
+  return { side, ic, ms, heelLift, to, confidence: c ? v / c : 0 };
+}
+
+/** Least-squares slope of y against t. */
+export function slope(t: ArrayLike<number>, y: ArrayLike<number>, from: number, to: number): number {
+  let n = 0, st = 0, sy = 0, stt = 0, sty = 0;
+  for (let i = from; i <= to; i++) {
+    if (!Number.isFinite(y[i])) continue;
+    n++; st += t[i]; sy += y[i]; stt += t[i] * t[i]; sty += t[i] * y[i];
+  }
+  const d = n * stt - st * st;
+  return n >= 3 && d !== 0 ? (n * sty - st * sy) / d : NaN;
+}
+
+/**
+ * Speed of the foot along the image x axis while it is planted (px/s,
+ * forward-positive). On a treadmill a planted foot rides the belt, so this is
+ * the belt speed in pixels; overground it is ~0. Uses the middle half of each
+ * stance, away from touchdown and push-off.
+ */
+export function stanceFootSpeedsPx(k: Kinematics, contacts: Contact[]): number[] {
+  const out: number[] = [];
+  for (const c of contacts) {
+    const L = LEG[c.side];
+    const a = Math.round(c.ic + 0.25 * (c.to - c.ic)), b = Math.round(c.to - 0.25 * (c.to - c.ic));
+    if (b - a < 3) continue;
+    const foot = new Float64Array(k.n).fill(NaN);
+    for (let f = a; f <= b; f++) foot[f] = (k.x[L.heel][f] + k.x[L.toe][f] + k.x[L.ankle][f]) / 3;
+    const v = slope(k.t, foot, a, b);
+    if (Number.isFinite(v)) out.push(k.dir * v);
   }
   return out;
 }

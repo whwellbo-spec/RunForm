@@ -25,8 +25,9 @@
         <div class="home-hero">
           <h1 class="wordmark">RunForm</h1>
           <p class="lede">Film yourself running from the side. RunForm tracks your body, scores your stride against the Pose Method and tells you what to drill.</p>
-          <label class="btn btn-primary btn-block">
-            Analyze a run
+          <button id="record-btn" type="button" class="btn btn-primary btn-block" hidden>Record a run · 120 fps</button>
+          <label id="import-label" class="btn btn-block">
+            Analyze a video from Photos
             <input id="file-input" type="file" accept="video/*,.mov,.mp4,.m4v" />
           </label>
           <p id="import-status" class="status"></p>
@@ -36,27 +37,44 @@
           <summary>How to film a good clip</summary>
           <ul class="guide-list">
             <li><b>From the side.</b> Phone on a tripod or ledge at hip height, 3–5 m away, square to your running direction.</li>
-            <li><b>Slo-mo.</b> Use the Camera app’s Slo-mo mode (240 fps is best).</li>
+            <li><b>Record in the app.</b> It films at 120 fps, shows when your whole body is in frame, and stops by itself (with a beep) once it has enough steps. The video is deleted after the analysis.</li>
             <li><b>Whole body in frame</b> the entire time, with space above your head and below your feet.</li>
-            <li><b>Steady pace.</b> On a treadmill, 10–20 s at your usual easy pace. Outdoors, run past the camera a few times.</li>
+            <li><b>Steady pace.</b> On a treadmill, start running before or after you tap record — it only counts steps once you’re running. Enter the belt speed for the most accurate distances.</li>
             <li><b>Bright light and fitted clothes</b> so your knees, ankles and feet are easy to see.</li>
-            <li><b>Save to Files first.</b> In Photos tap Share → Save to Files, then pick it from Files here. Picking straight from Photos can drop frames.</li>
+            <li><b>From Photos:</b> use Slo-mo (120 or 240 fps). Saving to Files first and picking it from Files keeps the most frames.</li>
           </ul>
         </details>
 
-        <h2 class="section-title">Past runs</h2>
+        <div class="section-head">
+          <h2 class="section-title">Past runs</h2>
+          <select id="runner-filter" aria-label="Runner"></select>
+        </div>
+        <div id="progress"></div>
+        <div class="btn-row"><button id="compare-btn" type="button" class="btn btn-quiet" hidden>Compare two runs</button></div>
+        <p id="compare-hint" class="fine" hidden>Tap two runs to compare them.</p>
         <div id="sessions" class="session-list"></div>
+        <div id="compare-bar" class="sticky-cta" hidden>
+          <button id="compare-go" type="button" class="btn btn-primary btn-block" disabled>Compare</button>
+        </div>
       </section>
 
       <!-- ============ SETUP ============ -->
       <section id="v-setup" class="view" hidden>
-        <div class="media-frame">
-          <video id="trim-video" muted playsinline preload="auto"></video>
+        <div class="file-only">
+          <div class="media-frame">
+            <video id="trim-video" muted playsinline preload="auto"></video>
+          </div>
+          <p id="clip-line" class="clip-line"></p>
+          <p id="clip-warning" class="callout callout-warn" hidden></p>
         </div>
-        <p id="clip-line" class="clip-line"></p>
-        <p id="clip-warning" class="callout callout-warn" hidden></p>
+        <p id="record-intro" class="callout record-only" hidden>Set these, then open the camera. Recording is 120 fps and stops by itself once it has enough steps.</p>
 
-        <div id="slowmo-field" class="field" hidden>
+        <div class="field">
+          <span class="field-label">Runner</span>
+          <select id="runner-select" aria-label="Runner"></select>
+        </div>
+
+        <div id="slowmo-field" class="field file-only" hidden>
           <span class="field-label">Filmed in</span>
           <div class="segmented" role="radiogroup">
             <label><input type="radio" name="slowmo" value="0" /><span>Normal</span></label>
@@ -82,7 +100,7 @@
             <label><input type="radio" name="surface" value="OVERGROUND" /><span>Outdoors / track</span></label>
           </div>
           <div id="speed-row" class="inline-inputs">
-            <input id="belt-speed" type="number" min="0" step="0.1" inputmode="decimal" placeholder="Speed (optional)" />
+            <input id="belt-speed" type="number" min="0" step="0.1" inputmode="decimal" placeholder="Belt speed (recommended)" />
             <select id="speed-unit" aria-label="Speed unit">
               <option value="mph">mph</option>
               <option value="kmh">km/h</option>
@@ -91,7 +109,7 @@
         </div>
 
         <div class="field">
-          <span class="field-label">Your height</span>
+          <span class="field-label">Height</span>
           <div class="inline-inputs">
             <input id="height-input" type="number" min="100" max="230" step="0.5" inputmode="decimal" />
             <select id="height-unit" aria-label="Height unit">
@@ -99,10 +117,10 @@
               <option value="cm">cm</option>
             </select>
           </div>
-          <p class="field-hint">Used to turn pixels into centimetres.</p>
+          <p class="field-hint">Saved with this runner. Used to turn pixels into centimetres when there’s no belt speed.</p>
         </div>
 
-        <details class="drawer">
+        <details class="drawer file-only">
           <summary>Choose the section to analyze</summary>
           <div class="trim">
             <label class="range-label">Start <output id="trim-start-out"></output>
@@ -118,7 +136,7 @@
           </div>
         </details>
 
-        <details class="drawer">
+        <details class="drawer file-only">
           <summary>Advanced</summary>
           <div class="adv-grid">
             <label>Tracking model
@@ -165,6 +183,11 @@
           <button id="resume-btn" type="button" class="btn btn-primary" hidden>Resume</button>
           <button id="cancel-btn" type="button" class="btn btn-quiet">Cancel</button>
         </div>
+      </section>
+
+      <!-- ============ COMPARE ============ -->
+      <section id="v-compare" class="view" hidden>
+        <div id="compare"></div>
       </section>
 
       <!-- ============ REPORT ============ -->

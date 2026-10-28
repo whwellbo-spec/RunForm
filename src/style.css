@@ -259,3 +259,60 @@ table.metrics .rng { display: block; font-size: 12px; color: var(--muted); }
 /* Setup: keep the preview short so the timing and view choices sit above the Analyze button. */
 #v-setup .media-frame video { max-height: 38vh; }
 .callout .btn { margin-top: 10px; }
+
+/* ---------- recording / setup modes ---------- */
+body.record-mode .file-only { display: none !important; }
+.record-only { margin-top: 10px; }
+
+/* ---------- home: runners, progress, compare ---------- */
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.section-head select { min-height: 38px; }
+.session-card.selected { outline: 2.5px solid var(--action); }
+.trend { background: var(--surface); border-radius: var(--r-md); padding: 12px 12px 4px; margin-bottom: 10px; }
+.trend canvas { display: block; width: 100%; touch-action: manipulation; }
+.trend-chips { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
+.trend-note { margin: 6px 0 8px; }
+
+/* ---------- report additions ---------- */
+.reliability { font-size: 14px; margin: 12px 0 2px; padding: 8px 12px; border-radius: var(--r-sm); background: var(--lane); }
+.reliability.rel-low { background: color-mix(in srgb, var(--amber) 18%, transparent); }
+.conf { display: inline-block; font: 600 12px/1 var(--body); padding: 4px 8px; border-radius: 10px; margin-bottom: 8px; }
+.conf-medium { background: var(--lane); color: var(--muted); }
+.conf-low { background: color-mix(in srgb, var(--amber) 20%, transparent); color: var(--ink); }
+table.metrics .conf { margin: 0 0 0 4px; padding: 2px 6px; font-size: 11px; }
+.evidence { margin-top: 10px; font-size: 14px; color: var(--muted); }
+.evidence summary { cursor: pointer; font-weight: 600; color: var(--ink); min-height: 32px; display: flex; align-items: center; list-style: none; }
+.evidence summary::-webkit-details-marker { display: none; }
+.evidence summary::after { content: "+"; margin-left: 8px; color: var(--muted); }
+.evidence[open] summary::after { content: "–"; }
+.evidence p { margin: 4px 0 0; }
+.general { background: var(--surface); border-radius: var(--r-md); padding: 14px 16px; margin-bottom: 10px; box-shadow: inset 5px 0 0 var(--green); }
+.general h3 { font: 700 19px/1.15 var(--cond); margin: 0 0 6px; }
+.general p { margin: 6px 0; font-size: 15px; }
+.general .research { font-size: 13px; color: var(--muted); }
+.general .research b { color: var(--ink); margin-right: 4px; }
+.exercise { border-top: 1px solid var(--line); padding: 8px 0 2px; }
+.exercise b { font-weight: 700; }
+.exercise span { float: right; font-size: 13px; color: var(--muted); }
+.exercise p { margin: 2px 0 4px; font-size: 14px; color: var(--muted); }
+.chart { background: var(--surface); border-radius: var(--r-md); padding: 10px 8px 2px; }
+.chart canvas { display: block; width: 100%; touch-action: none; }
+.chart-legend { margin: 6px 4px 8px; }
+.chart-legend .key { display: inline-block; width: 14px; height: 4px; border-radius: 2px; background: var(--c); margin: 0 4px 2px 8px; vertical-align: middle; }
+.chart-legend .key:first-child { margin-left: 0; }
+.chart-legend .key-line { background: var(--ink); height: 2px; }
+.edit-panel { background: var(--surface); border-radius: var(--r-md); padding: 10px 12px; display: grid; gap: 8px; }
+.edit-panel .fine { margin: 0; }
+.player-title { font: 700 18px var(--cond); margin: 14px 0 6px; }
+
+/* ---------- compare ---------- */
+.cmp-head { display: grid; grid-template-columns: 26px 56px 1fr; gap: 12px; align-items: center; background: var(--surface); border-radius: var(--r-md); padding: 10px 14px; margin: 8px 0; }
+.cmp-tag { font: 700 24px/1 var(--cond); color: var(--muted); }
+table.metrics.cmp th { font: 700 13px var(--body); color: var(--muted); padding-top: 8px; }
+table.metrics.cmp th.v { text-align: right; }
+.delta.up { color: var(--green); font-weight: 700; }
+.delta.down { color: var(--track); font-weight: 700; }
+.cmp-stills { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-bottom: 10px; }
+.cmp-pick { margin: 8px 0; }
+.cmp-pick.picked { border-color: var(--green); }
+.cmp-players { display: grid; gap: 4px; }

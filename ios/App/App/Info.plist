@@ -50,7 +50,7 @@
 	<key>NSPhotoLibraryUsageDescription</key>
 	<string>RunForm opens running videos you choose so it can analyse them on this device.</string>
 	<key>NSCameraUsageDescription</key>
-	<string>RunForm can record a running video to analyse on this device.</string>
+	<string>RunForm records 120 fps video of you running and analyses it on this device. The video is deleted after the analysis.</string>
 	<key>NSMicrophoneUsageDescription</key>
 	<string>Recording a video may capture audio; RunForm does not use it.</string>
 	<key>UIFileSharingEnabled</key>

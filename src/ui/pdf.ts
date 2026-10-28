@@ -1,7 +1,7 @@
 // Builds a shareable PDF of a run report, entirely on the device.
 import { jsPDF } from 'jspdf';
 import { DRILLS, PILLARS, type MetricResult, type Pillar } from '../analysis/posemethod';
-import { fixed, fmtVal, rangeText, statusOfScore, type ReportInput } from './report';
+import { fixed, fmtVal, rangeText, scaleLine, statusOfScore, type ReportInput } from './report';
 
 const C = {
   ink: '#14213D', muted: '#5B6B82', line: '#D5DCE5', lane: '#EEF1F4',
@@ -52,7 +52,8 @@ export function buildReportPdf(r: PdfInput): Blob {
   y += 18;
   font(24, 'bold'); color(C.ink); doc.text('Running form analysis', M, y + 20);
   y += 32;
-  para(`${date}  |  ${g.view === 'SAGITTAL' ? 'Side view' : 'Front/back view'}  |  ${r.surface === 'TREADMILL' ? 'Treadmill' : 'Outdoors'}  |  ${r.clipName}`, 10, { col: C.muted, gap: 14 });
+  para(`${r.runnerName}  |  ${date}  |  ${g.view === 'SAGITTAL' ? 'Side view' : 'Front/back view'}  |  ${r.surface === 'TREADMILL' ? 'Treadmill' : 'Outdoors'}  |  ${r.clipName}`, 10, { col: C.muted, gap: 2 });
+  para(`${scaleLine(g, r.heightCm)}. ${rep.reliability.text}`, 9.5, { col: C.muted, gap: 12 });
 
   // ---- score ----
   const overall = Number.isFinite(rep.overall) ? Math.round(rep.overall) : null;
@@ -121,7 +122,7 @@ export function buildReportPdf(r: PdfInput): Blob {
     font(10, 'bold'); color(C.ink);
     doc.text(t(`You: ${fmtVal(m.def, m.value)}`), x, y + 9);
     font(10); color(C.muted);
-    doc.text(t(`Pose range: ${rangeText(m.def)}`), x + 130, y + 9);
+    doc.text(t(`Pose range: ${rangeText(m.def, m.ranges)}${m.confidence === 'low' ? '  (low confidence)' : ''}`), x + 130, y + 9);
     y += 18;
     para(a.why, 10, { col: C.muted, x, width: CW - 18, gap: 3 });
     para(`Cue: ${a.cue}`, 10, { style: 'bold', x, width: CW - 18, gap: 3 });
@@ -152,6 +153,20 @@ export function buildReportPdf(r: PdfInput): Blob {
     para(d.how, 10, { col: C.muted, gap: 8 });
   }
 
+  // ---- beyond the Pose Method ----
+  if (rep.general.length) {
+    heading('Beyond the Pose Method', 80);
+    para('From general running research - mostly the strength work that backs up the form changes above.', 10, { col: C.muted, gap: 6 });
+    for (const f of rep.general) {
+      ensure(60);
+      para(f.title, 12, { style: 'bold', gap: 2 });
+      para(f.detail, 10, { gap: 2 });
+      para(`Research: ${f.research}`, 9.5, { col: C.muted, gap: 3 });
+      for (const e of f.exercises) para(`- ${e.name} (${e.dose}): ${e.how}`, 9.5, { gap: 2 });
+      y += 6;
+    }
+  }
+
   // ---- all measurements ----
   heading('All measurements', 60);
   const col = { metric: M, you: M + 220, lr: M + 290, range: M + 370, status: M + CW };
@@ -161,7 +176,7 @@ export function buildReportPdf(r: PdfInput): Blob {
     font(9.5, 'bold'); doc.text(t(fmtVal(m.def, m.value)), col.you, y + 10);
     font(9); color(C.muted);
     if (Number.isFinite(m.L) && Number.isFinite(m.R)) doc.text(t(`L ${fixed(m.L, m.def.decimals)} / R ${fixed(m.R, m.def.decimals)}`), col.lr, y + 10);
-    doc.text(t(rangeText(m.def)), col.range, y + 10);
+    doc.text(t(rangeText(m.def, m.ranges)), col.range, y + 10);
     const word = m.def.infoOnly ? 'Reference' : STATUS_WORD[m.status];
     font(9, 'bold'); color(m.def.infoOnly ? C.muted : C[m.status]);
     doc.text(word, col.status - doc.getTextWidth(word), y + 10);
@@ -186,7 +201,8 @@ export function buildReportPdf(r: PdfInput): Blob {
   heading('About this analysis');
   const notes = [
     `${g.steps.length} foot contacts measured from ${r.clipName}.`,
-    'Distances are scaled from the runner\'s height and are accurate to a few centimetres.',
+    g.scale.source === 'belt' ? 'Distances are measured from the treadmill belt speed.' : 'Distances are scaled from the runner\'s height and are accurate to a few centimetres.',
+    ...(g.view === 'SAGITTAL' ? [`Leg numbers use the ${g.nearSide === 'L' ? 'left' : 'right'} leg, nearer the camera.`] : []),
     'Ranges are coaching guides based on the Pose Method (Romanov). Contact time, cadence and fall angle change with speed, so compare runs at a similar pace.',
     ...g.warnings, ...r.notes,
   ];

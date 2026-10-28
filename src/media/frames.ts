@@ -43,12 +43,15 @@ export async function* sourceFrames(
 /** Draw a decoded (un-rotated) VideoFrame applying the track's rotation. */
 export function drawRotated(ctx: CanvasRenderingContext2D, frame: VideoFrame, c: ClipInfo): void {
   const w = c.codedWidth, h = c.codedHeight;
+  // Scale to the target canvas (which may be smaller than the frame), then rotate.
+  const sx = ctx.canvas.width / c.width, sy = ctx.canvas.height / c.height;
   ctx.save();
+  ctx.setTransform(sx, 0, 0, sy, 0, 0);
   switch (c.rotation) {
-    case 90: ctx.setTransform(0, 1, -1, 0, h, 0); break;
-    case 180: ctx.setTransform(-1, 0, 0, -1, w, h); break;
-    case 270: ctx.setTransform(0, -1, 1, 0, 0, w); break;
-    default: ctx.setTransform(1, 0, 0, 1, 0, 0);
+    case 90: ctx.transform(0, 1, -1, 0, h, 0); break;
+    case 180: ctx.transform(-1, 0, 0, -1, w, h); break;
+    case 270: ctx.transform(0, -1, 1, 0, 0, w); break;
+    default: break;
   }
   ctx.drawImage(frame, 0, 0, w, h);
   ctx.restore();

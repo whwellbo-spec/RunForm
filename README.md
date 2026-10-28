@@ -188,3 +188,28 @@ Native-app notes:
 `BASE_PATH=/<repo-name>/`, and deploys `dist/` to Pages on every push to `main`.
 To set it up once, open the repo's **Settings → Pages** and set **Source** to
 **GitHub Actions**.
+
+## Recording in the app (iOS)
+
+The iOS app records with its own native camera (`ios/App/App/RunCamera.swift`):
+120 fps only, real capture timestamps (no slow-mo retiming), and Apple's Vision
+body-pose tracker on ~15 frames a second to show framing and count steps. It
+stops by itself (beep + haptic) after 24 steps, or after 45 s. The analysis
+window starts when running was first seen. The recording is read into memory
+and its file deleted immediately; once you leave the report the video is gone
+and only the landmarks, numbers and key-frame stills are kept.
+
+## Analysis notes
+
+- **Scale:** on a treadmill with the belt speed entered, the planted foot's
+  speed in the video calibrates cm per pixel. If it disagrees with the
+  height-based estimate by more than ~40% the app falls back to height and
+  says what speed the video implies.
+- **Near leg:** in side view, leg metrics come from the leg nearer the camera;
+  bounce, trunk lean, flight and duty factor use both.
+- **Confidence:** each metric is rated from stride count and spread; low
+  confidence results never show as red and count less toward the score.
+- **Speed-aware ranges:** cadence and contact-time targets move with speed
+  when it's known (belt speed, or estimated when running past the camera).
+- **Contact correction:** "Fix contacts" in the player edits landings/toe-offs;
+  edits are stored with the run and replace automatic detection.

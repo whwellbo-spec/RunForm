@@ -26,6 +26,13 @@ export interface ExtractProgress {
   etaS: number;
 }
 
+/** Longest side of the frame handed to the pose model. */
+export const WORK_MAX = 960;
+export function workSize(w: number, h: number): [number, number] {
+  const k = Math.min(1, WORK_MAX / Math.max(w, h));
+  return [Math.round(w * k), Math.round(h * k)];
+}
+
 export type ExtractState = 'idle' | 'loading' | 'running' | 'paused' | 'done' | 'cancelled' | 'error';
 
 export interface ExtractStats {
@@ -71,7 +78,11 @@ export class Extractor {
       this.track.mediaTimeS[i] = p.clip.presTimeS[p.presStart + i];
       this.track.realTimeS[i] = real[i];
     }
-    this.work = makeCanvas(p.clip.width, p.clip.height);
+    // The pose model works on a small crop internally; a full-resolution work
+    // canvas only costs time. Landmarks come back normalized, so the track keeps
+    // full-resolution pixel coordinates either way.
+    const [ww, wh] = workSize(p.clip.width, p.clip.height);
+    this.work = makeCanvas(ww, wh);
     this.workCtx = this.work.getContext('2d', { willReadFrequently: false })!;
     this.stats = { delegate: 'CPU', model: p.model, path: p.path, unverifiedFrames: 0, elapsedS: 0, pauses: 0 };
   }
@@ -88,10 +99,9 @@ export class Extractor {
         this.video = await loadVideo(this.p.clip.file);
         if (this.video.videoWidth !== this.work.width || this.video.videoHeight !== this.work.height) {
           // Use whatever orientation the element presents.
-          this.work.width = this.video.videoWidth;
-          this.work.height = this.video.videoHeight;
-          this.track.width = this.work.width;
-          this.track.height = this.work.height;
+          [this.work.width, this.work.height] = workSize(this.video.videoWidth, this.video.videoHeight);
+          this.track.width = this.video.videoWidth;
+          this.track.height = this.video.videoHeight;
         }
       }
     } catch (e) {
